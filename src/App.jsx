@@ -35,7 +35,8 @@ import {
 /* ============================================================================
    SEED DATA -- your real June purchase log, cleaned to your renamed/trimmed
    67-item catalogue. "par" is left over from an earlier quantity-based
-   version and isn't used by this beta -- harmless to ignore.
+   version and isn't used by this beta -- harmless to ignore. Updated to reflect
+   current clinic catalogue. 
 ============================================================================ */
 const SEED_ITEMS = [
   {"code": "", "name": "Xylocaine", "brand": "", "category": "Local Anaesthetic", "supplier": "", "unitCost": 0.0, "par": 5},
