@@ -1340,7 +1340,7 @@ function CentralStock({ items, trackedItems, onEnableTracking, onDisableTracking
       <PageHeader
         eyebrow="Precision tracking"
         title="Real counts for critical items"
-        sub="For your highest-burn items only. Type in the real count when it's convenient -- not every use -- and the item flags itself once it hits its threshold."
+        sub="For items that run out the quickest. Type in the real count when it's convenient -- not every use -- and the item flags itself once it hits its threshold."
       />
 
       <div className="di-panel">
@@ -1580,7 +1580,7 @@ function Catalogue({ items, onReloadCatalogue }) {
 
   return (
     <div className="di-page">
-      <PageHeader eyebrow="Reference" title="Catalogue" sub="Every item you stock, searchable by name or code." />
+      <PageHeader eyebrow="Reference" title="Catalogue" sub="Every item that DB stocks, searchable by name." />
       <div className="di-toolbar">
         <div className="di-search">
           <Search size={15} />
@@ -1725,7 +1725,7 @@ function OrderRequests({ orderRequests, myRoom, onSubmit, onFulfill }) {
       <PageHeader
         eyebrow="Whitening supplies"
         title="Order Requests"
-        sub="Submit a live request for whitening product -- it lands here for whoever orders supplies to see and action."
+        sub="Submit a live request for whitening -- it lands here for whoever orders supplies to see and action."
       />
 
       <div className="di-panel di-log-form">
