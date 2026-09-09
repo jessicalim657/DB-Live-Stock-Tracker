@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Dental Boutique Stock</title>
+
+    <!-- Android / Chrome installability -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#17160F" />
+
+    <!-- iOS "Add to Home Screen" support (Safari ignores the manifest for some of this) -->
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="DB Stock" />
+
+    <link rel="icon" href="/icons/favicon-32.png" type="image/png" />
+
+    <!-- Distinctive type used throughout the app: Inter for body/UI, Fraunces
+         (an elegant high-contrast serif with a proper italic) for headings,
+         to echo Dental Boutique's own display type treatment. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:ital,wght@0,500;0,600;1,500;1,600&display=swap"
+      rel="stylesheet"
+    />
+
+    <style>
+      html, body, #root { height: 100%; margin: 0; }
+      body { background: #F1ECE1; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

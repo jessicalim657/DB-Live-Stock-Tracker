@@ -1,0 +1,32 @@
+// Paste this into: Firebase console -> Firestore Database -> Rules tab -> Publish.
+//
+// This scopes read/write to only the collections this app actually uses --
+// fine for an internal beta on your clinic's own devices, since there's no
+// patient data here, only stock item names, flags, and order requests. It
+// is NOT a real security boundary (anyone with your Firebase project ID
+// could technically read or write it) -- if you take this beyond a beta,
+// the next step is adding Firebase Authentication so only signed-in
+// clinic devices can read or write.
+//
+// "dentalBoutique" holds the catalogue and the currently-active flags
+// (both naturally small and bounded). "flagHistoryEvents" and
+// "orderRequests" are separate top-level collections, one document per
+// event/request, so they can grow indefinitely without ever hitting
+// Firestore's 1MB-per-document size limit.
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /dentalBoutique/{document} {
+      allow read, write: if true;
+    }
+    match /flagHistoryEvents/{document} {
+      allow read, write: if true;
+    }
+    match /orderRequests/{document} {
+      allow read, write: if true;
+    }
+    match /feedback/{document} {
+      allow read, write: if true;
+    }
+  }
+}
