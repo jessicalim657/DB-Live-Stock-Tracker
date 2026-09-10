@@ -20,6 +20,9 @@ import {
   PlusCircle,
   ShoppingCart,
   MessageSquare,
+  X,
+  Trash2,
+  ClipboardList,
 } from "lucide-react";
 import {
   BarChart,
@@ -35,8 +38,7 @@ import {
 /* ============================================================================
    SEED DATA -- your real June purchase log, cleaned to your renamed/trimmed
    67-item catalogue. "par" is left over from an earlier quantity-based
-   version and isn't used by this beta -- harmless to ignore. Updated to reflect
-   current clinic catalogue. 
+   version and isn't used by this beta -- harmless to ignore.
 ============================================================================ */
 const SEED_ITEMS = [
   {"code": "", "name": "Xylocaine", "brand": "", "category": "Local Anaesthetic", "supplier": "", "unitCost": 0.0, "par": 5},
@@ -260,6 +262,28 @@ const ROOMS = [
 const WHITENING_PRODUCTS = ["Pola Rapid Whitening", "Zoom Whitening"];
 const ORDER_TYPES = ["Take-Home Gels", "In Chair"];
 
+// The room-audit checklist is grouped into named sections rather than one
+// flat list. IDs are derived the same way seedItems() derives them (via
+// slugify), so these line up with the real catalogue items without needing
+// to know their generated IDs ahead of time. Some names below intentionally
+// match existing catalogue items exactly -- those are reused, not
+// duplicated, so ticking/crossing them here affects the same real item.
+// The room-audit checklist is entirely self-contained -- these are simple
+// named presence checks ("is this actually sitting in the room"), not tied
+// to the stock catalogue or the flagging system in any way. Crossing an
+// item here only ever changes this room's own audit record; it never
+// creates a stock flag or touches inventory data.
+const mkChecklistItem = (name) => ({ id: slugify(name), name });
+const DEFAULT_AUDIT_CHECKLIST = {
+  "Room Items": [
+    "SD card reader", "Microetcher", "Headphones", "Web cam", "Bib chain",
+    "Curing lights x2", "Retractors", "Occlusal mirror", "Contrasters - black",
+    "Shade tabs", "DB mirror", "Light shield", "1x Dark glasses", "1x DA glasses",
+    "Composite gun", "Light/heavy body gun",
+    "Discovery sheets", "TCA + bicarb", "Pens", "DB pricing packs",
+  ].map(mkChecklistItem),
+};
+
 const ITEMS_KEY = "dental-inv-items-v2";
 const FLAGS_KEY = "dental-inv-active-flags-v1";
 const HISTORY_KEY = "dental-inv-flag-history-v1";
@@ -391,6 +415,10 @@ export default function DentalInventoryApp() {
   const [history, setHistory] = useState(null); // append-only [{id, itemId, room, action, staff, date}]
   const [orderRequests, setOrderRequests] = useState(null); // [{id, room, dentistName, product, type, dayQty, nightQty, status, date, ...}]
   const [feedback, setFeedback] = useState(null); // [{id, message, name, role, date, status}]
+  const [auditChecklist, setAuditChecklist] = useState(null); // [itemId, ...] -- shared base list, same for every treatment room
+  const [roomCustomAuditItems, setRoomCustomAuditItems] = useState(null); // { [room]: [{id, text, status, updatedAt, updatedBy}] }
+  const [roomAuditStatus, setRoomAuditStatus] = useState(null); // { [room]: { [checklistItemId]: {status, updatedAt, updatedBy} } }
+  const [auditRoom, setAuditRoom] = useState(null); // which room's audit page is open right now
   const [myRoom, setMyRoomState] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saveError, setSaveError] = useState("");
@@ -402,6 +430,9 @@ export default function DentalInventoryApp() {
   useEffect(() => {
     const itemsRef = doc(db, "dentalBoutique", "items");
     const flagsRef = doc(db, "dentalBoutique", "activeFlags");
+    const auditChecklistRef = doc(db, "dentalBoutique", "auditChecklist");
+    const roomCustomAuditItemsRef = doc(db, "dentalBoutique", "roomCustomAuditItems");
+    const roomAuditStatusRef = doc(db, "dentalBoutique", "roomAuditStatus");
     // History and order requests are each stored as ONE FIRESTORE DOCUMENT
     // PER EVENT, inside their own collections -- not as one big array
     // inside a single document. A single document has a hard 1MB size
@@ -428,8 +459,21 @@ export default function DentalInventoryApp() {
     let historyLoaded = false;
     let ordersLoaded = false;
     let feedbackLoaded = false;
+    let auditChecklistLoaded = false;
+    let roomCustomAuditItemsLoaded = false;
+    let roomAuditStatusLoaded = false;
     const maybeStopLoading = () => {
-      if (itemsLoaded && flagsLoaded && historyLoaded && ordersLoaded && feedbackLoaded) setLoading(false);
+      if (
+        itemsLoaded &&
+        flagsLoaded &&
+        historyLoaded &&
+        ordersLoaded &&
+        feedbackLoaded &&
+        auditChecklistLoaded &&
+        roomCustomAuditItemsLoaded &&
+        roomAuditStatusLoaded
+      )
+        setLoading(false);
     };
 
     const unsubItems = onSnapshot(
@@ -494,6 +538,76 @@ export default function DentalInventoryApp() {
       () => setSaveError("Couldn't reach the database -- check firebase.js is filled in.")
     );
 
+    const unsubAuditChecklist = onSnapshot(
+      auditChecklistRef,
+      async (snap) => {
+        // This structure changed shape twice while being built out. Rather
+        // than write a migration for each prior shape, just detect whether
+        // what's stored matches the CURRENT self-contained shape (sections
+        // of {id, name} objects) and reseed with the default if not --
+        // nothing real was ever recorded against the older shapes.
+        const raw = snap.exists() ? snap.data().list : null;
+        const isCurrentShape =
+          raw &&
+          !Array.isArray(raw) &&
+          "Room Items" in raw &&
+          Object.values(raw).every(
+            (arr) => Array.isArray(arr) && arr.every((item) => item && typeof item === "object" && "name" in item)
+          );
+        if (isCurrentShape) {
+          setAuditChecklist(raw);
+        } else {
+          setAuditChecklist(DEFAULT_AUDIT_CHECKLIST);
+          try {
+            await setDoc(auditChecklistRef, { list: DEFAULT_AUDIT_CHECKLIST });
+          } catch (e) {
+            setSaveError("Couldn't reach the database -- check firebase.js is filled in.");
+          }
+        }
+        auditChecklistLoaded = true;
+        maybeStopLoading();
+      },
+      () => setSaveError("Couldn't reach the database -- check firebase.js is filled in.")
+    );
+
+    const unsubRoomAuditStatus = onSnapshot(
+      roomAuditStatusRef,
+      async (snap) => {
+        if (snap.exists()) {
+          setRoomAuditStatus(snap.data().byRoom || {});
+        } else {
+          setRoomAuditStatus({});
+          try {
+            await setDoc(roomAuditStatusRef, { byRoom: {} });
+          } catch (e) {
+            setSaveError("Couldn't reach the database -- check firebase.js is filled in.");
+          }
+        }
+        roomAuditStatusLoaded = true;
+        maybeStopLoading();
+      },
+      () => setSaveError("Couldn't reach the database -- check firebase.js is filled in.")
+    );
+
+    const unsubRoomCustomAuditItems = onSnapshot(
+      roomCustomAuditItemsRef,
+      async (snap) => {
+        if (snap.exists()) {
+          setRoomCustomAuditItems(snap.data().byRoom || {});
+        } else {
+          setRoomCustomAuditItems({});
+          try {
+            await setDoc(roomCustomAuditItemsRef, { byRoom: {} });
+          } catch (e) {
+            setSaveError("Couldn't reach the database -- check firebase.js is filled in.");
+          }
+        }
+        roomCustomAuditItemsLoaded = true;
+        maybeStopLoading();
+      },
+      () => setSaveError("Couldn't reach the database -- check firebase.js is filled in.")
+    );
+
     // "My room" is genuinely local to this one phone, so plain browser
     // storage is the right tool -- no need to involve the shared database.
     try {
@@ -506,6 +620,9 @@ export default function DentalInventoryApp() {
       unsubHistory();
       unsubOrders();
       unsubFeedback();
+      unsubAuditChecklist();
+      unsubRoomCustomAuditItems();
+      unsubRoomAuditStatus();
     };
   }, []);
 
@@ -609,6 +726,138 @@ export default function DentalInventoryApp() {
     } catch (e) {
       setSaveError("Couldn't save -- check your connection.");
     }
+  }, []);
+
+  // ---- room auditing: base checklist (shared, real catalogue items) ------
+  const persistAuditChecklist = useCallback(async (next) => {
+    setAuditChecklist(next);
+    try {
+      await setDoc(doc(db, "dentalBoutique", "auditChecklist"), { list: next });
+      setSaveError("");
+    } catch (e) {
+      setSaveError("Couldn't save -- check your connection.");
+    }
+  }, []);
+
+  const addChecklistItem = useCallback(
+    (section, name) => {
+      const current = auditChecklist[section] || [];
+      let id = slugify(name);
+      let n = 2;
+      const existingIds = new Set(current.map((i) => i.id));
+      while (existingIds.has(id)) {
+        id = `${slugify(name)}-${n}`;
+        n++;
+      }
+      persistAuditChecklist({ ...auditChecklist, [section]: [...current, { id, name }] });
+    },
+    [auditChecklist, persistAuditChecklist]
+  );
+
+  // Per-room presence status for the shared checklist items -- entirely
+  // separate from stock, flags, or the catalogue. This is purely "was this
+  // physically confirmed present in this specific room."
+  const persistRoomAuditStatus = useCallback(async (next) => {
+    setRoomAuditStatus(next);
+    try {
+      await setDoc(doc(db, "dentalBoutique", "roomAuditStatus"), { byRoom: next });
+      setSaveError("");
+    } catch (e) {
+      setSaveError("Couldn't save -- check your connection.");
+    }
+  }, []);
+
+  const setRoomAuditItemStatus = useCallback(
+    (room, itemId, status, staff) => {
+      const existing = roomAuditStatus[room] || {};
+      const updated = { ...existing, [itemId]: { status, updatedAt: new Date().toISOString(), updatedBy: staff || "" } };
+      persistRoomAuditStatus({ ...roomAuditStatus, [room]: updated });
+    },
+    [roomAuditStatus, persistRoomAuditStatus]
+  );
+
+  // Removing a checklist item also wipes any per-room status recorded
+  // against it, everywhere -- so it can never linger as an orphaned
+  // "missing" entry with no name to show, the way earlier test data did.
+  const removeChecklistItem = useCallback(
+    (section, itemId) => {
+      const current = auditChecklist[section] || [];
+      persistAuditChecklist({ ...auditChecklist, [section]: current.filter((i) => i.id !== itemId) });
+
+      const cleanedRoomStatus = {};
+      Object.entries(roomAuditStatus).forEach(([room, statuses]) => {
+        const rest = { ...statuses };
+        delete rest[itemId];
+        cleanedRoomStatus[room] = rest;
+      });
+      persistRoomAuditStatus(cleanedRoomStatus);
+    },
+    [auditChecklist, persistAuditChecklist, roomAuditStatus, persistRoomAuditStatus]
+  );
+
+  // ---- room auditing: personalised free-text items, per room, permanent --
+  const persistRoomCustomAuditItems = useCallback(async (next) => {
+    setRoomCustomAuditItems(next);
+    try {
+      await setDoc(doc(db, "dentalBoutique", "roomCustomAuditItems"), { byRoom: next });
+      setSaveError("");
+    } catch (e) {
+      setSaveError("Couldn't save -- check your connection.");
+    }
+  }, []);
+
+  const addCustomAuditItem = useCallback(
+    (room, text) => {
+      const entry = {
+        id: `custom_${Date.now()}_${Math.round(Math.random() * 9999)}`,
+        text,
+        status: null, // null | "ok" | "attention"
+        updatedAt: null,
+        updatedBy: "",
+      };
+      const existing = roomCustomAuditItems[room] || [];
+      persistRoomCustomAuditItems({ ...roomCustomAuditItems, [room]: [...existing, entry] });
+    },
+    [roomCustomAuditItems, persistRoomCustomAuditItems]
+  );
+
+  const removeCustomAuditItem = useCallback(
+    (room, itemId) => {
+      const existing = roomCustomAuditItems[room] || [];
+      persistRoomCustomAuditItems({ ...roomCustomAuditItems, [room]: existing.filter((i) => i.id !== itemId) });
+    },
+    [roomCustomAuditItems, persistRoomCustomAuditItems]
+  );
+
+  const setCustomAuditItemStatus = useCallback(
+    (room, itemId, status, staff) => {
+      const existing = roomCustomAuditItems[room] || [];
+      const updated = existing.map((i) =>
+        i.id === itemId ? { ...i, status, updatedAt: new Date().toISOString(), updatedBy: staff || "" } : i
+      );
+      persistRoomCustomAuditItems({ ...roomCustomAuditItems, [room]: updated });
+    },
+    [roomCustomAuditItems, persistRoomCustomAuditItems]
+  );
+
+  // A finished audit leaves a permanent record -- who audited which room,
+  // and how many items needed flagging -- without needing a whole separate
+  // history mechanism. Reuses the same permanent flagHistoryEvents log as
+  // everything else.
+  const logAuditCompleted = useCallback((room, staff, reviewedCount, flaggedCount) => {
+    const entry = {
+      id: `h_${Date.now()}_${Math.round(Math.random() * 9999)}`,
+      itemId: null,
+      room,
+      action: "audited",
+      staff: staff || "",
+      reviewedCount,
+      flaggedCount,
+      date: new Date().toISOString(),
+    };
+    setDoc(doc(collection(db, "flagHistoryEvents"), entry.id), entry).catch(() =>
+      setSaveError("Couldn't save -- check your connection.")
+    );
   }, []);
 
   const setMyRoom = useCallback(async (room) => {
@@ -776,6 +1025,43 @@ export default function DentalInventoryApp() {
     [orderRequests]
   );
 
+  // Every checklist item or personalised item currently crossed as missing,
+  // across every room -- purely derived from the audit data, completely
+  // separate from stock flags.
+  const missingAuditItems = useMemo(() => {
+    if (!roomAuditStatus || !roomCustomAuditItems || !auditChecklist) return [];
+    const nameById = {};
+    Object.values(auditChecklist).forEach((arr) => {
+      (arr || []).forEach((item) => {
+        nameById[item.id] = item.name;
+      });
+    });
+    const results = [];
+    Object.entries(roomAuditStatus).forEach(([room, statuses]) => {
+      Object.entries(statuses || {}).forEach(([itemId, info]) => {
+        // If this item no longer exists on the checklist (removed since
+        // this status was set), there's nothing meaningful to show --
+        // skip it rather than display a confusing "Unknown item."
+        if (info.status === "attention" && nameById[itemId]) {
+          results.push({
+            room,
+            name: nameById[itemId],
+            updatedAt: info.updatedAt,
+            updatedBy: info.updatedBy,
+          });
+        }
+      });
+    });
+    Object.entries(roomCustomAuditItems).forEach(([room, list]) => {
+      (list || []).forEach((c) => {
+        if (c.status === "attention") {
+          results.push({ room, name: c.text, updatedAt: c.updatedAt, updatedBy: c.updatedBy });
+        }
+      });
+    });
+    return results.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+  }, [roomAuditStatus, roomCustomAuditItems, auditChecklist]);
+
   if (loading) {
     return (
       <Shell view={view} setView={setView}>
@@ -796,6 +1082,7 @@ export default function DentalInventoryApp() {
           activeFlags={activeFlags}
           autoLowItems={autoLowItems}
           openOrders={openOrders}
+          missingAuditItems={missingAuditItems}
           roomsAffected={roomsAffected}
           myRoom={myRoom}
           setView={setView}
@@ -812,7 +1099,31 @@ export default function DentalInventoryApp() {
         />
       )}
       {view === "rooms" && (
-        <RoomsOverview items={itemsById} activeFlags={activeFlags} onToggle={toggleFlag} />
+        <RoomsOverview
+          items={itemsById}
+          activeFlags={activeFlags}
+          onToggle={toggleFlag}
+          onOpenAudit={(room) => {
+            setAuditRoom(room);
+            setView("audit-room");
+          }}
+        />
+      )}
+      {view === "audit-room" && (
+        <AuditRoom
+          room={auditRoom}
+          auditChecklist={auditChecklist}
+          roomStatus={roomAuditStatus[auditRoom] || {}}
+          customItems={roomCustomAuditItems[auditRoom] || []}
+          myRoom={myRoom}
+          onSetItemStatus={setRoomAuditItemStatus}
+          onRemoveChecklistItem={removeChecklistItem}
+          onAddCustomItem={addCustomAuditItem}
+          onRemoveCustomItem={removeCustomAuditItem}
+          onSetCustomStatus={setCustomAuditItemStatus}
+          onLogCompleted={logAuditCompleted}
+          onBack={() => setView("rooms")}
+        />
       )}
       {view === "stock" && (
         <CentralStock
@@ -901,7 +1212,7 @@ function Shell({ view, setView, saveError, children }) {
 /* ============================================================================
    DASHBOARD
 ============================================================================ */
-function Dashboard({ items, itemsById, activeFlags, autoLowItems, openOrders, roomsAffected, myRoom, setView, onRebuildFlags }) {
+function Dashboard({ items, itemsById, activeFlags, autoLowItems, openOrders, missingAuditItems, roomsAffected, myRoom, setView, onRebuildFlags }) {
   const [confirmingRebuild, setConfirmingRebuild] = useState(false);
   const [rebuildResult, setRebuildResult] = useState(null); // null | { count: number }
 
@@ -931,6 +1242,11 @@ function Dashboard({ items, itemsById, activeFlags, autoLowItems, openOrders, ro
         <StatCard label="Room flags" value={activeFlags.length} tone={activeFlags.length > 0 ? "critical" : "default"} />
         <StatCard label="Central items low" value={autoLowItems.length} tone={autoLowItems.length > 0 ? "critical" : "default"} />
         <StatCard label="Open orders" value={openOrders.length} tone={openOrders.length > 0 ? "watch" : "default"} />
+        <StatCard
+          label="Total items Missing"
+          value={missingAuditItems.length}
+          tone={missingAuditItems.length > 0 ? "critical" : "default"}
+        />
       </div>
 
       <div className="di-panel">
@@ -993,6 +1309,32 @@ function Dashboard({ items, itemsById, activeFlags, autoLowItems, openOrders, ro
                 </li>
               );
             })}
+          </ul>
+        )}
+      </div>
+
+      <div className="di-panel">
+        <div className="di-panel-head">
+          <h3>Missing items from rooms</h3>
+          <span className="di-panel-count">{missingAuditItems.length}</span>
+        </div>
+        {missingAuditItems.length === 0 ? (
+          <EmptyState icon={CircleCheck} text="Nothing crossed as missing in any room audit." />
+        ) : (
+          <ul className="di-alert-list">
+            {missingAuditItems.map((m, idx) => (
+              <li key={idx} className="di-alert-row">
+                <span className="di-status-dot" style={{ background: "var(--red)" }} />
+                <div className="di-alert-main">
+                  <div className="di-alert-name">{m.name}</div>
+                  <div className="di-alert-meta">{m.room}</div>
+                </div>
+                <div className="di-alert-figures">
+                  <div className="di-alert-stock">{m.updatedAt ? timeAgo(m.updatedAt) : ""}</div>
+                  {m.updatedBy && <div className="di-alert-days">by {m.updatedBy}</div>}
+                </div>
+              </li>
+            ))}
           </ul>
         )}
       </div>
@@ -1227,11 +1569,13 @@ function ReportLowStock({ items, activeFlags, myRoom, setMyRoom, onToggle }) {
 /* ============================================================================
    ROOMS OVERVIEW
 ============================================================================ */
-function RoomsOverview({ items, activeFlags, onToggle }) {
+function RoomsOverview({ items, activeFlags, onToggle, onOpenAudit }) {
   const byRoom = ROOMS.map((room) => ({
     room,
     flags: activeFlags.filter((f) => f.room === room),
   })).sort((a, b) => b.flags.length - a.flags.length);
+
+  const isTreatmentRoom = (room) => room !== "Sterilisation" && room !== "Lab";
 
   return (
     <div className="di-page">
@@ -1282,12 +1626,218 @@ function RoomsOverview({ items, activeFlags, onToggle }) {
                 })}
               </ul>
             )}
+            {isTreatmentRoom(room) && (
+              <button className="di-ghost-btn di-audit-btn" onClick={() => onOpenAudit(room)}>
+                <ClipboardList size={13} /> Audit
+              </button>
+            )}
           </div>
         ))}
       </div>
     </div>
   );
 }
+
+/* ============================================================================
+   AUDIT ROOM -- a fast, structured tick/cross walkthrough for one treatment
+   room. Base checklist items are real catalogue items and plug straight
+   into the existing flag system (cross = flag, tick-on-a-flagged-item =
+   resolve). Personalised items are free text specific to this one room,
+   have their own small persistent status, and never reset -- they're not
+   tied to the catalogue at all, since a room's own quirks often aren't
+   stock items in the usual sense.
+============================================================================ */
+function AuditRoom({
+  room,
+  auditChecklist,
+  roomStatus,
+  customItems,
+  myRoom,
+  onSetItemStatus,
+  onRemoveChecklistItem,
+  onAddCustomItem,
+  onRemoveCustomItem,
+  onSetCustomStatus,
+  onLogCompleted,
+  onBack,
+}) {
+  const [staff, setStaff] = useState("");
+  const [customText, setCustomText] = useState("");
+
+  if (!room) {
+    return (
+      <div className="di-page">
+        <EmptyState icon={Info} text="No room selected." />
+      </div>
+    );
+  }
+
+  const sections = Object.keys(auditChecklist);
+  const allChecklistItems = sections.flatMap((s) => auditChecklist[s] || []);
+
+  const addCustom = () => {
+    if (!customText.trim()) return;
+    onAddCustomItem(room, customText.trim());
+    setCustomText("");
+  };
+
+  const finishAudit = () => {
+    const statuses = allChecklistItems.map((i) => roomStatus[i.id]?.status).filter(Boolean);
+    const customStatuses = customItems.map((c) => c.status).filter(Boolean);
+    const allStatuses = [...statuses, ...customStatuses];
+    const reviewedCount = allStatuses.length;
+    const flaggedCount = allStatuses.filter((s) => s === "attention").length;
+    onLogCompleted(room, staff, reviewedCount, flaggedCount);
+    onBack();
+  };
+
+  return (
+    <div className="di-page">
+      <button className="di-linklike di-back-link" onClick={onBack}>
+        &larr; Back to By room
+      </button>
+      <PageHeader
+        eyebrow="Room audit"
+        title={`Auditing ${room}`}
+        sub="A simple presence check -- tick what's actually in the room, cross what isn't. Nothing here touches stock levels or flags."
+      />
+
+      <div className="di-panel">
+        <div className="di-field" style={{ maxWidth: 220 }}>
+          <label>Your name (optional)</label>
+          <input placeholder="e.g. Jess" value={staff} onChange={(e) => setStaff(e.target.value)} />
+        </div>
+      </div>
+
+      {sections.map((section) => (
+        <AuditSection
+          key={section}
+          section={section}
+          sectionItems={auditChecklist[section] || []}
+          roomStatus={roomStatus}
+          onSetStatus={(itemId, status) => onSetItemStatus(room, itemId, status, staff)}
+          onRemove={(itemId) => onRemoveChecklistItem(section, itemId)}
+        />
+      ))}
+
+      <div className="di-panel">
+        <div className="di-panel-head">
+          <h3>Personalised for {room}</h3>
+          <span className="di-panel-count">{customItems.length}</span>
+        </div>
+        {customItems.length === 0 ? (
+          <EmptyState icon={Info} text="Nothing personalised yet for this room." />
+        ) : (
+          <ul className="di-activity-list">
+            {customItems.map((c) => (
+              <li key={c.id} className="di-audit-row">
+                <div className="di-activity-main">
+                  <div className="di-cell-name">{c.text}</div>
+                  <div className="di-cell-sub">
+                    {c.updatedAt
+                      ? `Last checked ${timeAgo(c.updatedAt)}${c.updatedBy ? ` by ${c.updatedBy}` : ""}`
+                      : "Never checked yet"}
+                  </div>
+                </div>
+                <div className="di-audit-actions">
+                  <button
+                    className={`di-audit-btn-tick ${c.status === "ok" ? "is-active" : ""}`}
+                    onClick={() => onSetCustomStatus(room, c.id, "ok", staff)}
+                    title="Present"
+                  >
+                    <CircleCheck size={16} />
+                  </button>
+                  <button
+                    className={`di-audit-btn-cross ${c.status === "attention" ? "is-active" : ""}`}
+                    onClick={() => onSetCustomStatus(room, c.id, "attention", staff)}
+                    title="Needs attention"
+                  >
+                    <X size={16} />
+                  </button>
+                  <button
+                    className="di-audit-btn-remove"
+                    onClick={() => onRemoveCustomItem(room, c.id)}
+                    title="Remove permanently"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="di-field-row" style={{ marginTop: 12 }}>
+          <input
+            placeholder="e.g. Composite heater, stressball…"
+            value={customText}
+            onChange={(e) => setCustomText(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addCustom()}
+            style={{ flex: 1 }}
+          />
+          <button className="di-small-btn" onClick={addCustom}>
+            <PlusCircle size={13} /> Add
+          </button>
+        </div>
+      </div>
+
+      <button className="di-primary-btn" onClick={finishAudit}>
+        Finish audit
+      </button>
+    </div>
+  );
+}
+
+// One named section of the shared checklist (e.g. "Equipment"). Items here
+// are plain named entries, not catalogue items -- adding one is just typing
+// a name, not searching stock. Status is tracked per room, since whether
+// something is actually sitting in Room 3 is a different question from
+// whether it's sitting in Room 12.
+function AuditSection({ section, sectionItems, roomStatus, onSetStatus, onRemove }) {
+  return (
+    <div className="di-panel">
+      <div className="di-panel-head">
+        <h3>{section}</h3>
+        <span className="di-panel-count">{sectionItems.length}</span>
+      </div>
+      {sectionItems.length === 0 ? (
+        <EmptyState icon={Info} text="No items in this section." />
+      ) : (
+        <ul className="di-activity-list">
+          {sectionItems.map((item) => {
+            const status = roomStatus[item.id]?.status;
+            return (
+              <li key={item.id} className="di-audit-row">
+                <div className="di-activity-main">
+                  <div className="di-cell-name">{item.name}</div>
+                </div>
+                <div className="di-audit-actions">
+                  <button
+                    className={`di-audit-btn-tick ${status === "ok" ? "is-active" : ""}`}
+                    onClick={() => onSetStatus(item.id, "ok")}
+                    title="Present"
+                  >
+                    <CircleCheck size={16} />
+                  </button>
+                  <button
+                    className={`di-audit-btn-cross ${status === "attention" ? "is-active" : ""}`}
+                    onClick={() => onSetStatus(item.id, "attention")}
+                    title="Missing"
+                  >
+                    <X size={16} />
+                  </button>
+                  <button className="di-audit-btn-remove" onClick={() => onRemove(item.id)} title="Remove from checklist">
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 
 /* ============================================================================
    CENTRAL STOCK -- option 2: occasional real counts, per-item threshold,
@@ -1340,7 +1890,7 @@ function CentralStock({ items, trackedItems, onEnableTracking, onDisableTracking
       <PageHeader
         eyebrow="Precision tracking"
         title="Real counts for critical items"
-        sub="For items that run out the quickest. Type in the real count when it's convenient -- not every use -- and the item flags itself once it hits its threshold."
+        sub="For your highest-burn items only. Type in the real count when it's convenient -- not every use -- and the item flags itself once it hits its threshold."
       />
 
       <div className="di-panel">
@@ -1580,7 +2130,7 @@ function Catalogue({ items, onReloadCatalogue }) {
 
   return (
     <div className="di-page">
-      <PageHeader eyebrow="Reference" title="Catalogue" sub="Every item that DB stocks, searchable by name." />
+      <PageHeader eyebrow="Reference" title="Catalogue" sub="Every item you stock, searchable by name or code." />
       <div className="di-toolbar">
         <div className="di-search">
           <Search size={15} />
@@ -1725,7 +2275,7 @@ function OrderRequests({ orderRequests, myRoom, onSubmit, onFulfill }) {
       <PageHeader
         eyebrow="Whitening supplies"
         title="Order Requests"
-        sub="Submit a live request for whitening -- it lands here for whoever orders supplies to see and action."
+        sub="Submit a live request for whitening product -- it lands here for whoever orders supplies to see and action."
       />
 
       <div className="di-panel di-log-form">
@@ -2073,7 +2623,7 @@ const CSS = `
   background: none; border: none; padding: 0; color: var(--clay); font-weight: 600;
   cursor: pointer; text-decoration: underline; font-size: inherit; font-family: inherit;
 }
-.di-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 22px; }
+.di-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 22px; }
 .di-stat {
   background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
   padding: 14px 16px;
@@ -2202,6 +2752,23 @@ const CSS = `
 .di-rooms-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
 .di-room-card { margin-bottom: 0; }
 .di-room-card.has-flags { border-left: 3px solid var(--red); }
+.di-audit-btn { width: 100%; justify-content: center; margin-top: 10px; }
+.di-back-link { display: inline-block; margin-bottom: 10px; font-size: 12.5px; }
+.di-audit-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 9px 2px; border-bottom: 1px solid var(--line);
+}
+.di-audit-row:last-child { border-bottom: none; }
+.di-audit-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.di-audit-btn-tick, .di-audit-btn-cross, .di-audit-btn-remove {
+  display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: 7px; border: 1px solid var(--line);
+  background: var(--panel); cursor: pointer; color: var(--ink-soft);
+}
+.di-audit-btn-tick.is-active { background: var(--green-bg); border-color: var(--green); color: var(--green); }
+.di-audit-btn-cross.is-active { background: var(--red-bg); border-color: var(--red); color: var(--red); }
+.di-audit-btn-remove { border: none; background: none; color: var(--ink-soft); width: 24px; height: 24px; }
+.di-audit-btn-remove:hover { color: var(--red); }
 @media (max-width: 760px) {
   .di-root { flex-direction: column; }
   .di-rail { width: 100%; flex-direction: row; align-items: center; padding: 12px 16px; gap: 16px; }
