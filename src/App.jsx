@@ -249,8 +249,8 @@ const SEED_ITEMS = [
   {"code": "", "name": "Yellow IPR strip", "brand": "", "category": "Orthodontics", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Blue IPR strip", "brand": "", "category": "Orthodontics", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Prophy paste", "brand": "", "category": "Others", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Small microbrushes", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5}
-  {"code": "", "name": "Temp Bond", "brand": "", "category": "Restorative (fillings, crowns, veneers)", "supplier": "", "unitCost": 0.0, "par": 5}
+  {"code": "", "name": "Small microbrushes", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Temp Bond", "brand": "", "category": "Restorative (fillings, crowns, veneers)", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Bulk EZ A2", "brand": "", "category": "Restorative (fillings, crowns, veneers)", "supplier": "", "unitCost": 0.0, "par": 5}   
 ];
 
