@@ -1626,7 +1626,7 @@ function RoomsOverview({ items, activeFlags, missingAuditItems, onToggle, onOpen
       <PageHeader
         eyebrow="All 19 locations"
         title="By room"
-        sub="See which rooms need restocking or are missing equipment, without walking over to check."
+        sub="See which rooms need restocking or are missing equipment, without walking over to check. Project Audit, but make it digital 😎."
       />
       <div className="di-rooms-grid">
         {byRoom.map(({ room, flags, missing }) => (
@@ -2101,7 +2101,7 @@ function Trends({ items, history, onEnableTracking, setView }) {
       <PageHeader
         eyebrow="Patterns"
         title="Most frequently flagged"
-        sub="No quantities yet, but this counts how often each item gets flagged low."
+        sub="This counts how often each item gets flagged low. Dark red discs are culprit #1 🤣."
       />
 
       <div className="di-panel">
@@ -2195,7 +2195,7 @@ function Catalogue({ items, onReloadCatalogue }) {
 
   return (
     <div className="di-page">
-      <PageHeader eyebrow="Reference" title="Catalogue" sub="Every item you stock, searchable by name or code." />
+      <PageHeader eyebrow="Reference" title="Catalogue" sub="Every item that DB stocks, searchable by name!" />
       <div className="di-toolbar">
         <div className="di-search">
           <Search size={15} />
