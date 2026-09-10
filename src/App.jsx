@@ -23,6 +23,8 @@ import {
   X,
   Trash2,
   ClipboardList,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import {
   BarChart,
@@ -151,7 +153,6 @@ const SEED_ITEMS = [
   {"code": "", "name": "Light blue microbrush", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Dark green microbrush", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Light green microbrush", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Brushy brush", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Dappen dish", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Vaseline", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Neutral Detergent Wipes", "brand": "", "category": "Infection Control", "supplier": "", "unitCost": 0.0, "par": 5, "tracked": true, "lowThreshold": 5},
@@ -223,10 +224,8 @@ const SEED_ITEMS = [
   {"code": "", "name": "Endo irrigation tip", "brand": "", "category": "Endodontics", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "12 Scalpel", "brand": "", "category": "Sharps", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "15 Scalpel", "brand": "", "category": "Sharps", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "15C Scalpel", "brand": "", "category": "Sharps", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Bonding resin", "brand": "", "category": "Restorative (fillings, crowns, veneers)", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Clip Flo", "brand": "", "category": "Surgery", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Curasept Gel", "brand": "", "category": "Surgery", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Medium composite", "brand": "", "category": "Restorative (fillings, crowns, veneers)", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Light composite", "brand": "", "category": "Restorative (fillings, crowns, veneers)", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Clear strips", "brand": "", "category": "Isolation", "supplier": "", "unitCost": 0.0, "par": 5},
@@ -235,10 +234,8 @@ const SEED_ITEMS = [
   {"code": "", "name": "Triple tray (quadrant)", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Triple tray (full arch)", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Sutures (4.0 glycon)", "brand": "", "category": "Surgery", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Sutures (5.0 glycon)", "brand": "", "category": "Surgery", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Saline bags", "brand": "", "category": "Surgery", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Saline bottle", "brand": "", "category": "Surgery", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Gelatamp", "brand": "", "category": "Surgery", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Endovit (cold spray)", "brand": "", "category": "Others", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Aluminium oxide powder", "brand": "", "category": "Others", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Handicare hand and body cleanser", "brand": "", "category": "PPE", "supplier": "", "unitCost": 0.0, "par": 5},
@@ -254,18 +251,7 @@ const SEED_ITEMS = [
   {"code": "", "name": "Yellow IPR strip", "brand": "", "category": "Orthodontics", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Blue IPR strip", "brand": "", "category": "Orthodontics", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Prophy paste", "brand": "", "category": "Others", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Micro microbrushes", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Temp Bond", "brand": "", "category": "Restorative (fillings, crowns, veneers)", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Bite Reg material", "brand": "", "category": "Restorative (fillings, crowns, veneers)", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Odontopaste", "brand": "", "category": "Endodontics", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Endo post", "brand": "", "category": "Endodontics", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Super Floss", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Gorilla Floss", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Caries detector", "brand": "", "category": "Others", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Diamond polishing paste", "brand": "", "category": "Others", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Piksters", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Polident retainer tablets", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Bulk EZ A2", "brand": "", "category": "Restorative (fillings, crowns, veneers)", "supplier": "", "unitCost": 0.0, "par": 5}   
+  {"code": "", "name": "Small microbrushes", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5}
 ];
 
 /* 17 treatment rooms plus the two shared stock locations. Edit freely. */
@@ -1118,6 +1104,7 @@ export default function DentalInventoryApp() {
         <RoomsOverview
           items={itemsById}
           activeFlags={activeFlags}
+          missingAuditItems={missingAuditItems}
           onToggle={toggleFlag}
           onOpenAudit={(room) => {
             setAuditRoom(room);
@@ -1228,11 +1215,48 @@ function Shell({ view, setView, saveError, children }) {
 /* ============================================================================
    DASHBOARD
 ============================================================================ */
+// A collapsible group of items for one room -- closed by default, so a
+// long list of flags/missing items across many rooms doesn't read as one
+// overwhelming wall of text. A DA can open just the room they're
+// physically standing in and work through it, then move on.
+function RoomGroup({ room, count, children }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="di-room-group">
+      <button className="di-room-group-header" onClick={() => setOpen(!open)}>
+        <span className="di-room-group-name">{room}</span>
+        <span className="di-room-group-right">
+          <span className="di-room-group-count">{count}</span>
+          {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </span>
+      </button>
+      {open && <ul className="di-activity-list di-room-group-body">{children}</ul>}
+    </div>
+  );
+}
+
 function Dashboard({ items, itemsById, activeFlags, autoLowItems, openOrders, missingAuditItems, roomsAffected, myRoom, setView, onRebuildFlags }) {
   const [confirmingRebuild, setConfirmingRebuild] = useState(false);
   const [rebuildResult, setRebuildResult] = useState(null); // null | { count: number }
 
   const sorted = [...activeFlags].sort((a, b) => new Date(a.flaggedAt) - new Date(b.flaggedAt));
+
+  const roomOrder = (room) => {
+    const idx = ROOMS.indexOf(room);
+    return idx === -1 ? ROOMS.length : idx;
+  };
+
+  const flagsByRoom = {};
+  sorted.forEach((f) => {
+    (flagsByRoom[f.room] = flagsByRoom[f.room] || []).push(f);
+  });
+  const flagRoomEntries = Object.entries(flagsByRoom).sort((a, b) => roomOrder(a[0]) - roomOrder(b[0]));
+
+  const missingByRoom = {};
+  missingAuditItems.forEach((m) => {
+    (missingByRoom[m.room] = missingByRoom[m.room] || []).push(m);
+  });
+  const missingRoomEntries = Object.entries(missingByRoom).sort((a, b) => roomOrder(a[0]) - roomOrder(b[0]));
 
   return (
     <div className="di-page">
@@ -1304,28 +1328,30 @@ function Dashboard({ items, itemsById, activeFlags, autoLowItems, openOrders, mi
           <h3>Rooms reporting low stock</h3>
           <span className="di-panel-count">{sorted.length}</span>
         </div>
-        {sorted.length === 0 ? (
+        {flagRoomEntries.length === 0 ? (
           <EmptyState icon={CircleCheck} text="Nothing flagged right now." />
         ) : (
-          <ul className="di-alert-list">
-            {sorted.map((f) => {
-              const item = itemsById[f.itemId];
-              if (!item) return null;
-              return (
-                <li key={flagKeyReact(f)} className="di-alert-row">
-                  <span className="di-status-dot" style={{ background: "var(--red)" }} />
-                  <div className="di-alert-main">
-                    <div className="di-alert-name">{item.name}</div>
-                    <div className="di-alert-meta">{item.category} · {f.room}</div>
-                  </div>
-                  <div className="di-alert-figures">
-                    <div className="di-alert-stock">{timeAgo(f.flaggedAt)}</div>
-                    {f.staff && <div className="di-alert-days">flagged by {f.staff}</div>}
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
+          flagRoomEntries.map(([room, flags]) => (
+            <RoomGroup key={room} room={room} count={flags.length}>
+              {flags.map((f) => {
+                const item = itemsById[f.itemId];
+                if (!item) return null;
+                return (
+                  <li key={flagKeyReact(f)} className="di-alert-row">
+                    <span className="di-status-dot" style={{ background: "var(--red)" }} />
+                    <div className="di-alert-main">
+                      <div className="di-alert-name">{item.name}</div>
+                      <div className="di-alert-meta">{item.category}</div>
+                    </div>
+                    <div className="di-alert-figures">
+                      <div className="di-alert-stock">{timeAgo(f.flaggedAt)}</div>
+                      {f.staff && <div className="di-alert-days">flagged by {f.staff}</div>}
+                    </div>
+                  </li>
+                );
+              })}
+            </RoomGroup>
+          ))
         )}
       </div>
 
@@ -1334,24 +1360,25 @@ function Dashboard({ items, itemsById, activeFlags, autoLowItems, openOrders, mi
           <h3>Missing items from rooms</h3>
           <span className="di-panel-count">{missingAuditItems.length}</span>
         </div>
-        {missingAuditItems.length === 0 ? (
+        {missingRoomEntries.length === 0 ? (
           <EmptyState icon={CircleCheck} text="Nothing crossed as missing in any room audit." />
         ) : (
-          <ul className="di-alert-list">
-            {missingAuditItems.map((m, idx) => (
-              <li key={idx} className="di-alert-row">
-                <span className="di-status-dot" style={{ background: "var(--red)" }} />
-                <div className="di-alert-main">
-                  <div className="di-alert-name">{m.name}</div>
-                  <div className="di-alert-meta">{m.room}</div>
-                </div>
-                <div className="di-alert-figures">
-                  <div className="di-alert-stock">{m.updatedAt ? timeAgo(m.updatedAt) : ""}</div>
-                  {m.updatedBy && <div className="di-alert-days">by {m.updatedBy}</div>}
-                </div>
-              </li>
-            ))}
-          </ul>
+          missingRoomEntries.map(([room, missingItems]) => (
+            <RoomGroup key={room} room={room} count={missingItems.length}>
+              {missingItems.map((m, idx) => (
+                <li key={idx} className="di-alert-row">
+                  <span className="di-status-dot" style={{ background: "var(--red)" }} />
+                  <div className="di-alert-main">
+                    <div className="di-alert-name">{m.name}</div>
+                  </div>
+                  <div className="di-alert-figures">
+                    <div className="di-alert-stock">{m.updatedAt ? timeAgo(m.updatedAt) : ""}</div>
+                    {m.updatedBy && <div className="di-alert-days">by {m.updatedBy}</div>}
+                  </div>
+                </li>
+              ))}
+            </RoomGroup>
+          ))
         )}
       </div>
 
@@ -1585,11 +1612,12 @@ function ReportLowStock({ items, activeFlags, myRoom, setMyRoom, onToggle }) {
 /* ============================================================================
    ROOMS OVERVIEW
 ============================================================================ */
-function RoomsOverview({ items, activeFlags, onToggle, onOpenAudit }) {
+function RoomsOverview({ items, activeFlags, missingAuditItems, onToggle, onOpenAudit }) {
   const byRoom = ROOMS.map((room) => ({
     room,
     flags: activeFlags.filter((f) => f.room === room),
-  })).sort((a, b) => b.flags.length - a.flags.length);
+    missing: missingAuditItems.filter((m) => m.room === room),
+  })).sort((a, b) => b.flags.length + b.missing.length - (a.flags.length + a.missing.length));
 
   const isTreatmentRoom = (room) => room !== "Sterilisation" && room !== "Lab";
 
@@ -1598,10 +1626,10 @@ function RoomsOverview({ items, activeFlags, onToggle, onOpenAudit }) {
       <PageHeader
         eyebrow="All 19 locations"
         title="By room"
-        sub="See which rooms need restocking without walking over to check."
+        sub="See which rooms need restocking or are missing equipment, without walking over to check."
       />
       <div className="di-rooms-grid">
-        {byRoom.map(({ room, flags }) => (
+        {byRoom.map(({ room, flags, missing }) => (
           <div key={room} className={`di-panel di-room-card ${flags.length > 0 ? "has-flags" : ""}`}>
             <div className="di-panel-head">
               <h3>{room}</h3>
@@ -1642,6 +1670,27 @@ function RoomsOverview({ items, activeFlags, onToggle, onOpenAudit }) {
                 })}
               </ul>
             )}
+
+            {missing.length > 0 && (
+              <div className="di-room-missing">
+                <div className="di-room-missing-head">
+                  <X size={12} />
+                  <span>Missing items</span>
+                  <span className="di-room-missing-count">{missing.length}</span>
+                </div>
+                <ul className="di-activity-list">
+                  {missing.map((m, idx) => (
+                    <li key={idx} className="di-activity-row">
+                      <div className="di-activity-main">
+                        <div className="di-cell-name">{m.name}</div>
+                        <div className="di-cell-sub">{m.updatedAt ? timeAgo(m.updatedAt) : ""}</div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             {isTreatmentRoom(room) && (
               <button className="di-ghost-btn di-audit-btn" onClick={() => onOpenAudit(room)}>
                 <ClipboardList size={13} /> Audit
@@ -2664,6 +2713,22 @@ const CSS = `
   font-size: 13px; padding: 18px 4px;
 }
 .di-alert-list { list-style: none; margin: 0; padding: 0; }
+.di-room-group { border-bottom: 1px solid var(--line); }
+.di-room-group:last-child { border-bottom: none; }
+.di-room-group-header {
+  width: 100%; display: flex; align-items: center; justify-content: space-between;
+  background: none; border: none; cursor: pointer; padding: 10px 2px; font-family: inherit;
+  color: var(--ink); text-align: left;
+}
+.di-room-group-header:hover { background: var(--paper); }
+.di-room-group-name { font-size: 13.5px; font-weight: 600; }
+.di-room-group-right { display: flex; align-items: center; gap: 8px; color: var(--ink-soft); }
+.di-room-group-count {
+  font-family: 'Inter', sans-serif; font-variant-numeric: tabular-nums; font-size: 11.5px;
+  background: var(--red-bg); color: var(--red); padding: 2px 8px; border-radius: 20px; font-weight: 600;
+}
+.di-room-group-body { padding: 0 2px 8px 14px; }
+.di-room-group-body .di-alert-row:last-child { border-bottom: none; }
 .di-alert-row {
   display: flex; align-items: center; gap: 12px; padding: 10px 2px;
   border-bottom: 1px solid var(--line);
@@ -2769,6 +2834,16 @@ const CSS = `
 .di-room-card { margin-bottom: 0; }
 .di-room-card.has-flags { border-left: 3px solid var(--red); }
 .di-audit-btn { width: 100%; justify-content: center; margin-top: 10px; }
+.di-room-missing { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
+.di-room-missing-head {
+  display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600;
+  color: var(--red); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 4px;
+}
+.di-room-missing-count {
+  margin-left: auto; font-family: 'Inter', sans-serif; font-variant-numeric: tabular-nums;
+  background: var(--red-bg); color: var(--red); padding: 1px 7px; border-radius: 20px; font-weight: 600;
+  text-transform: none; letter-spacing: normal;
+}
 .di-back-link { display: inline-block; margin-bottom: 10px; font-size: 12.5px; }
 .di-audit-row {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
