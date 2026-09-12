@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { doc, onSnapshot, setDoc, updateDoc, collection, query, orderBy, limit } from "firebase/firestore";
+import { doc, onSnapshot, setDoc, updateDoc, deleteDoc, collection, query, orderBy, limit } from "firebase/firestore";
 import { db } from "./firebase.js";
 import {
   LayoutDashboard,
@@ -251,7 +251,23 @@ const SEED_ITEMS = [
   {"code": "", "name": "Yellow IPR strip", "brand": "", "category": "Orthodontics", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Blue IPR strip", "brand": "", "category": "Orthodontics", "supplier": "", "unitCost": 0.0, "par": 5},
   {"code": "", "name": "Prophy paste", "brand": "", "category": "Others", "supplier": "", "unitCost": 0.0, "par": 5},
-  {"code": "", "name": "Small microbrushes", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5}
+  {"code": "", "name": "Temp Bond", "brand": "", "category": "Restorative (fillings, crowns, veneers)", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Bulk EZ A2", "brand": "", "category": "Restorative (fillings, crowns, veneers)", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Curasept Gel", "brand": "", "category": "Surgery", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Gorilla Floss", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Polident retainer tablets", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Piksters", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Super Floss", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Brushy brush", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "15C Scalpel", "brand": "", "category": "Sharps", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Sutures (5.0 glycon)", "brand": "", "category": "Surgery", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Gelatamp", "brand": "", "category": "Surgery", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Micro microbrushes", "brand": "", "category": "Disposables", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Bite Reg material", "brand": "", "category": "Restorative (fillings, crowns, veneers)", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Odontopaste", "brand": "", "category": "Endodontics", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Endo post", "brand": "", "category": "Endodontics", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Caries detector", "brand": "", "category": "Others", "supplier": "", "unitCost": 0.0, "par": 5},
+  {"code": "", "name": "Diamond polishing paste", "brand": "", "category": "Others", "supplier": "", "unitCost": 0.0, "par": 5}
 ];
 
 /* 17 treatment rooms plus the two shared stock locations. Edit freely. */
@@ -290,6 +306,7 @@ const ITEMS_KEY = "dental-inv-items-v2";
 const FLAGS_KEY = "dental-inv-active-flags-v1";
 const HISTORY_KEY = "dental-inv-flag-history-v1";
 const MY_ROOM_KEY = "dental-inv-my-room-v1"; // personal (per device), not shared
+const MY_NAME_KEY = "dental-inv-my-name-v1"; // personal (per device), not shared
 
 const AUD = (n) =>
   (n ?? 0).toLocaleString("en-AU", { style: "currency", currency: "AUD" });
@@ -359,6 +376,9 @@ function seedItems() {
       currentCount: null,
       lastCountedAt: null,
       lastCountedBy: "",
+      status: "in_stock",
+      statusUpdatedAt: null,
+      statusUpdatedBy: "",
     };
   });
 }
@@ -372,9 +392,22 @@ function withTrackingDefaults(item) {
     currentCount: null,
     lastCountedAt: null,
     lastCountedBy: "",
+    // Overall clinic-level supply status -- separate from room flags (which
+    // are "is this missing from THIS room right now") and Central Stock
+    // (real counts vs threshold). This answers "can we even get more of
+    // this at all," set deliberately by whoever's ordering, not per-room.
+    status: "in_stock", // "in_stock" | "low" | "out" | "backorder"
+    statusUpdatedAt: null,
+    statusUpdatedBy: "",
     ...item,
   };
 }
+
+const ITEM_STATUSES = [
+  { value: "in_stock", label: "In stock", color: "var(--green)", bg: "var(--green-bg)" },
+  { value: "backorder", label: "On backorder", color: "var(--clay)", bg: "var(--paper)" },
+];
+const itemStatusMeta = (status) => ITEM_STATUSES.find((s) => s.value === status) || ITEM_STATUSES[0];
 
 const flagKey = (itemId, room) => `${itemId}::${room}`;
 
@@ -422,6 +455,7 @@ export default function DentalInventoryApp() {
   const [roomAuditStatus, setRoomAuditStatus] = useState(null); // { [room]: { [checklistItemId]: {status, updatedAt, updatedBy} } }
   const [auditRoom, setAuditRoom] = useState(null); // which room's audit page is open right now
   const [myRoom, setMyRoomState] = useState(null);
+  const [myName, setMyNameState] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saveError, setSaveError] = useState("");
   const [view, setView] = useState("dashboard");
@@ -433,8 +467,18 @@ export default function DentalInventoryApp() {
     const itemsRef = doc(db, "dentalBoutique", "items");
     const flagsRef = doc(db, "dentalBoutique", "activeFlags");
     const auditChecklistRef = doc(db, "dentalBoutique", "auditChecklist");
-    const roomCustomAuditItemsRef = doc(db, "dentalBoutique", "roomCustomAuditItems");
-    const roomAuditStatusRef = doc(db, "dentalBoutique", "roomAuditStatus");
+    // These two used to be one shared document each, holding every room's
+    // data together, rewritten whole on every single edit. With 18+ rooms
+    // potentially editing close together, two devices could each build
+    // their update from a slightly-stale copy of that shared blob, and
+    // whichever wrote last would silently clobber the other's change --
+    // which is exactly why personalised items looked like they "only saved
+    // locally." Real per-record documents (like history/orders/feedback
+    // already use) make that structurally impossible: different rooms, or
+    // different items, can never collide, because they're never the same
+    // document.
+    const roomCustomAuditItemsQuery = query(collection(db, "roomCustomAuditItems"));
+    const roomAuditStatusQuery = query(collection(db, "roomAuditStatus"));
     // History and order requests are each stored as ONE FIRESTORE DOCUMENT
     // PER EVENT, inside their own collections -- not as one big array
     // inside a single document. A single document has a hard 1MB size
@@ -573,18 +617,19 @@ export default function DentalInventoryApp() {
     );
 
     const unsubRoomAuditStatus = onSnapshot(
-      roomAuditStatusRef,
-      async (snap) => {
-        if (snap.exists()) {
-          setRoomAuditStatus(snap.data().byRoom || {});
-        } else {
-          setRoomAuditStatus({});
-          try {
-            await setDoc(roomAuditStatusRef, { byRoom: {} });
-          } catch (e) {
-            setSaveError("Couldn't reach the database -- check firebase.js is filled in.");
-          }
-        }
+      roomAuditStatusQuery,
+      (snap) => {
+        const byRoom = {};
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          byRoom[data.room] = byRoom[data.room] || {};
+          byRoom[data.room][data.itemId] = {
+            status: data.status,
+            updatedAt: data.updatedAt,
+            updatedBy: data.updatedBy,
+          };
+        });
+        setRoomAuditStatus(byRoom);
         roomAuditStatusLoaded = true;
         maybeStopLoading();
       },
@@ -592,18 +637,21 @@ export default function DentalInventoryApp() {
     );
 
     const unsubRoomCustomAuditItems = onSnapshot(
-      roomCustomAuditItemsRef,
-      async (snap) => {
-        if (snap.exists()) {
-          setRoomCustomAuditItems(snap.data().byRoom || {});
-        } else {
-          setRoomCustomAuditItems({});
-          try {
-            await setDoc(roomCustomAuditItemsRef, { byRoom: {} });
-          } catch (e) {
-            setSaveError("Couldn't reach the database -- check firebase.js is filled in.");
-          }
-        }
+      roomCustomAuditItemsQuery,
+      (snap) => {
+        const byRoom = {};
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          byRoom[data.room] = byRoom[data.room] || [];
+          byRoom[data.room].push({
+            id: data.id,
+            text: data.text,
+            status: data.status,
+            updatedAt: data.updatedAt,
+            updatedBy: data.updatedBy,
+          });
+        });
+        setRoomCustomAuditItems(byRoom);
         roomCustomAuditItemsLoaded = true;
         maybeStopLoading();
       },
@@ -614,6 +662,7 @@ export default function DentalInventoryApp() {
     // storage is the right tool -- no need to involve the shared database.
     try {
       setMyRoomState(localStorage.getItem(MY_ROOM_KEY));
+      setMyNameState(localStorage.getItem(MY_NAME_KEY));
     } catch (e) {}
 
     return () => {
@@ -759,88 +808,66 @@ export default function DentalInventoryApp() {
   // Per-room presence status for the shared checklist items -- entirely
   // separate from stock, flags, or the catalogue. This is purely "was this
   // physically confirmed present in this specific room."
-  const persistRoomAuditStatus = useCallback(async (next) => {
-    setRoomAuditStatus(next);
-    try {
-      await setDoc(doc(db, "dentalBoutique", "roomAuditStatus"), { byRoom: next });
-      setSaveError("");
-    } catch (e) {
-      setSaveError("Couldn't save -- check your connection.");
-    }
+  // One document per room+item combination -- setting Room 4's status for
+  // "Web cam" can never collide with Room 9 setting its own status for a
+  // different item, because they're never the same document.
+  const setRoomAuditItemStatus = useCallback((room, itemId, status, staff) => {
+    const now = new Date().toISOString();
+    setDoc(doc(db, "roomAuditStatus", `${room}::${itemId}`), {
+      room,
+      itemId,
+      status,
+      updatedAt: now,
+      updatedBy: staff || "",
+    }).catch(() => setSaveError("Couldn't save -- check your connection."));
   }, []);
-
-  const setRoomAuditItemStatus = useCallback(
-    (room, itemId, status, staff) => {
-      const existing = roomAuditStatus[room] || {};
-      const updated = { ...existing, [itemId]: { status, updatedAt: new Date().toISOString(), updatedBy: staff || "" } };
-      persistRoomAuditStatus({ ...roomAuditStatus, [room]: updated });
-    },
-    [roomAuditStatus, persistRoomAuditStatus]
-  );
 
   // Removing a checklist item also wipes any per-room status recorded
   // against it, everywhere -- so it can never linger as an orphaned
   // "missing" entry with no name to show, the way earlier test data did.
+  // Each room's status lives in its own document now, so this is just a
+  // direct delete per room rather than a read-modify-write of anything.
   const removeChecklistItem = useCallback(
     (section, itemId) => {
       const current = auditChecklist[section] || [];
       persistAuditChecklist({ ...auditChecklist, [section]: current.filter((i) => i.id !== itemId) });
-
-      const cleanedRoomStatus = {};
-      Object.entries(roomAuditStatus).forEach(([room, statuses]) => {
-        const rest = { ...statuses };
-        delete rest[itemId];
-        cleanedRoomStatus[room] = rest;
+      ROOMS.forEach((room) => {
+        deleteDoc(doc(db, "roomAuditStatus", `${room}::${itemId}`)).catch(() => {});
       });
-      persistRoomAuditStatus(cleanedRoomStatus);
     },
-    [auditChecklist, persistAuditChecklist, roomAuditStatus, persistRoomAuditStatus]
+    [auditChecklist, persistAuditChecklist]
   );
 
   // ---- room auditing: personalised free-text items, per room, permanent --
-  const persistRoomCustomAuditItems = useCallback(async (next) => {
-    setRoomCustomAuditItems(next);
-    try {
-      await setDoc(doc(db, "dentalBoutique", "roomCustomAuditItems"), { byRoom: next });
-      setSaveError("");
-    } catch (e) {
-      setSaveError("Couldn't save -- check your connection.");
-    }
+  // One document per custom item -- adding an item to Room 6 can never
+  // collide with someone adding a different item to Room 11 at the same
+  // moment, because they're always separate documents.
+  const addCustomAuditItem = useCallback((room, text) => {
+    const id = `custom_${Date.now()}_${Math.round(Math.random() * 9999)}`;
+    setDoc(doc(db, "roomCustomAuditItems", id), {
+      id,
+      room,
+      text,
+      status: null, // null | "ok" | "attention"
+      updatedAt: null,
+      updatedBy: "",
+    }).catch(() => setSaveError("Couldn't save -- check your connection."));
   }, []);
 
-  const addCustomAuditItem = useCallback(
-    (room, text) => {
-      const entry = {
-        id: `custom_${Date.now()}_${Math.round(Math.random() * 9999)}`,
-        text,
-        status: null, // null | "ok" | "attention"
-        updatedAt: null,
-        updatedBy: "",
-      };
-      const existing = roomCustomAuditItems[room] || [];
-      persistRoomCustomAuditItems({ ...roomCustomAuditItems, [room]: [...existing, entry] });
-    },
-    [roomCustomAuditItems, persistRoomCustomAuditItems]
-  );
+  const removeCustomAuditItem = useCallback((room, itemId) => {
+    deleteDoc(doc(db, "roomCustomAuditItems", itemId)).catch(() =>
+      setSaveError("Couldn't save -- check your connection.")
+    );
+  }, []);
 
-  const removeCustomAuditItem = useCallback(
-    (room, itemId) => {
-      const existing = roomCustomAuditItems[room] || [];
-      persistRoomCustomAuditItems({ ...roomCustomAuditItems, [room]: existing.filter((i) => i.id !== itemId) });
-    },
-    [roomCustomAuditItems, persistRoomCustomAuditItems]
-  );
-
-  const setCustomAuditItemStatus = useCallback(
-    (room, itemId, status, staff) => {
-      const existing = roomCustomAuditItems[room] || [];
-      const updated = existing.map((i) =>
-        i.id === itemId ? { ...i, status, updatedAt: new Date().toISOString(), updatedBy: staff || "" } : i
-      );
-      persistRoomCustomAuditItems({ ...roomCustomAuditItems, [room]: updated });
-    },
-    [roomCustomAuditItems, persistRoomCustomAuditItems]
-  );
+  const setCustomAuditItemStatus = useCallback((room, itemId, status, staff) => {
+    const now = new Date().toISOString();
+    updateDoc(doc(db, "roomCustomAuditItems", itemId), {
+      status,
+      updatedAt: now,
+      updatedBy: staff || "",
+    }).catch(() => setSaveError("Couldn't save -- check your connection."));
+  }, []);
 
   // A finished audit leaves a permanent record -- who audited which room,
   // and how many items needed flagging -- without needing a whole separate
@@ -869,6 +896,13 @@ export default function DentalInventoryApp() {
     } catch (e) {}
   }, []);
 
+  const setMyName = useCallback(async (name) => {
+    setMyNameState(name);
+    try {
+      localStorage.setItem(MY_NAME_KEY, name);
+    } catch (e) {}
+  }, []);
+
   const persistItems = useCallback(async (next) => {
     setItems(next);
     try {
@@ -879,55 +913,27 @@ export default function DentalInventoryApp() {
     }
   }, []);
 
-  // ---- central stock tracking (option 2: occasional counts, auto-flag) ----
-  const enableTracking = useCallback(
-    (itemId, threshold) => {
-      persistItems(
-        items.map((i) =>
-          i.id === itemId ? { ...i, tracked: true, lowThreshold: Math.max(0, threshold) } : i
-        )
-      );
-    },
-    [items, persistItems]
-  );
-
-  const disableTracking = useCallback(
-    (itemId) => {
-      persistItems(items.map((i) => (i.id === itemId ? { ...i, tracked: false } : i)));
-    },
-    [items, persistItems]
-  );
-
-  const setThreshold = useCallback(
-    (itemId, threshold) => {
-      persistItems(
-        items.map((i) => (i.id === itemId ? { ...i, lowThreshold: Math.max(0, threshold) } : i))
-      );
-    },
-    [items, persistItems]
-  );
-
-  const updateCount = useCallback(
-    (itemId, count, staff) => {
+  // Overall clinic-level supply status, set deliberately by whoever's
+  // ordering -- separate from room flags and Central Stock. This never
+  // touches activeFlags or currentCount, just the item's own status field.
+  const setItemStatus = useCallback(
+    (itemId, status, staff) => {
       const now = new Date().toISOString();
       persistItems(
-        items.map((i) =>
-          i.id === itemId
-            ? { ...i, currentCount: Math.max(0, count), lastCountedAt: now, lastCountedBy: staff || "" }
-            : i
-        )
+        items.map((i) => (i.id === itemId ? { ...i, status, statusUpdatedAt: now, statusUpdatedBy: staff || "" } : i))
       );
-      addHistoryEvent({
-        id: `h_${Date.now()}_${Math.round(Math.random() * 9999)}`,
-        itemId,
-        room: "Critical stock",
-        action: "counted",
-        staff: staff || "",
-        qty: count,
-        date: now,
-      });
     },
-    [items, persistItems, addHistoryEvent]
+    [items, persistItems]
+  );
+
+  // A real, deliberate way to remove an item from the catalogue entirely --
+  // for cleaning up mistakes (leftover test items, duplicates) that
+  // "Reload catalogue" can no longer touch now that reload never deletes.
+  const removeItem = useCallback(
+    (itemId) => {
+      persistItems(items.filter((i) => i.id !== itemId));
+    },
+    [items, persistItems]
   );
 
   // ---- the whole app boils down to this one toggle ------------------------
@@ -995,9 +1001,42 @@ export default function DentalInventoryApp() {
   // tradeoff: it resets every item's tracking/threshold/count fields back
   // to whatever SEED_ITEMS says, so any central-stock tracking set up by
   // hand since going live would need to be re-added afterwards.
+  // Catalogue info (name, category, cost, etc.) always comes from the code.
+  // Live data that only exists because someone used the app -- Central
+  // Stock counts, thresholds, and now item status -- is preserved for any
+  // item that already existed, and only defaults to the code's values for
+  // items that are genuinely new. This is what actually makes "Reload
+  // catalogue" safe to use routinely instead of a once-off risky action.
   const reloadCatalogue = useCallback(async () => {
-    await persistItems(seedItems());
-  }, [persistItems]);
+    const fresh = seedItems();
+    const freshIds = new Set(fresh.map((i) => i.id));
+    const existingById = {};
+    items.forEach((i) => {
+      existingById[i.id] = i;
+    });
+    const merged = fresh.map((newItem) => {
+      const existing = existingById[newItem.id];
+      if (!existing) return newItem;
+      return {
+        ...newItem,
+        tracked: existing.tracked,
+        lowThreshold: existing.lowThreshold,
+        currentCount: existing.currentCount,
+        lastCountedAt: existing.lastCountedAt,
+        lastCountedBy: existing.lastCountedBy,
+        status: existing.status,
+        statusUpdatedAt: existing.statusUpdatedAt,
+        statusUpdatedBy: existing.statusUpdatedBy,
+      };
+    });
+    // Anything that exists live but was never added to SEED_ITEMS -- e.g.
+    // an item added straight in the Firebase console -- is kept as-is
+    // rather than silently dropped. This makes reload purely additive: it
+    // can update/add from the code, but it can never delete something
+    // that only exists live.
+    const liveOnlyItems = items.filter((i) => !freshIds.has(i.id));
+    await persistItems([...merged, ...liveOnlyItems]);
+  }, [persistItems, items]);
 
   // ---- derived --------------------------------------------------------
   const itemsById = useMemo(() => {
@@ -1012,15 +1051,30 @@ export default function DentalInventoryApp() {
     return new Set(activeFlags.map((f) => f.room)).size;
   }, [activeFlags]);
 
-  const trackedItems = useMemo(() => (items ? items.filter((i) => i.tracked) : []), [items]);
+  // Items management has flagged as on backorder -- shown clinic-wide on
+  // the Dashboard regardless of room, since it's not a room-level concept.
+  const backorderedItems = useMemo(() => (items ? items.filter((i) => i.status === "backorder") : []), [items]);
 
-  const autoLowItems = useMemo(
-    () =>
-      trackedItems.filter(
-        (i) => i.currentCount !== null && i.lowThreshold !== null && i.currentCount <= i.lowThreshold
-      ),
-    [trackedItems]
-  );
+  // The most recent completed audits, straight from the permanent history
+  // log -- every "Finish audit" click writes one of these, so this needs
+  // no separate tracking of its own.
+  // One entry per treatment room, not per audit event -- shows whether
+  // each of the 18 rooms has ever been audited, and if so, only the most
+  // recent one, so a room audited five times doesn't crowd out a room
+  // that's never been checked at all.
+  const roomAudits = useMemo(() => {
+    if (!history) return [];
+    const treatmentRooms = ROOMS.filter((r) => r !== "Sterilisation" && r !== "Lab");
+    const latestByRoom = {};
+    history
+      .filter((h) => h.action === "audited")
+      .forEach((h) => {
+        if (!latestByRoom[h.room] || new Date(h.date) > new Date(latestByRoom[h.room].date)) {
+          latestByRoom[h.room] = h;
+        }
+      });
+    return treatmentRooms.map((room) => ({ room, audit: latestByRoom[room] || null }));
+  }, [history]);
 
   const openOrders = useMemo(
     () => (orderRequests ? orderRequests.filter((r) => r.status === "open") : []),
@@ -1046,6 +1100,8 @@ export default function DentalInventoryApp() {
         // skip it rather than display a confusing "Unknown item."
         if (info.status === "attention" && nameById[itemId]) {
           results.push({
+            type: "checklist",
+            itemId,
             room,
             name: nameById[itemId],
             updatedAt: info.updatedAt,
@@ -1057,7 +1113,14 @@ export default function DentalInventoryApp() {
     Object.entries(roomCustomAuditItems).forEach(([room, list]) => {
       (list || []).forEach((c) => {
         if (c.status === "attention") {
-          results.push({ room, name: c.text, updatedAt: c.updatedAt, updatedBy: c.updatedBy });
+          results.push({
+            type: "custom",
+            itemId: c.id,
+            room,
+            name: c.text,
+            updatedAt: c.updatedAt,
+            updatedBy: c.updatedBy,
+          });
         }
       });
     });
@@ -1082,12 +1145,17 @@ export default function DentalInventoryApp() {
           items={items}
           itemsById={itemsById}
           activeFlags={activeFlags}
-          autoLowItems={autoLowItems}
+          backorderedItems={backorderedItems}
+          roomAudits={roomAudits}
           openOrders={openOrders}
           missingAuditItems={missingAuditItems}
           roomsAffected={roomsAffected}
           myRoom={myRoom}
+          myName={myName}
           setView={setView}
+          onToggle={toggleFlag}
+          onSetItemStatus={setRoomAuditItemStatus}
+          onSetCustomStatus={setCustomAuditItemStatus}
           onRebuildFlags={rebuildFlagsFromHistory}
         />
       )}
@@ -1097,6 +1165,8 @@ export default function DentalInventoryApp() {
           activeFlags={activeFlags}
           myRoom={myRoom}
           setMyRoom={setMyRoom}
+          myName={myName}
+          setMyName={setMyName}
           onToggle={toggleFlag}
         />
       )}
@@ -1119,6 +1189,8 @@ export default function DentalInventoryApp() {
           roomStatus={roomAuditStatus[auditRoom] || {}}
           customItems={roomCustomAuditItems[auditRoom] || []}
           myRoom={myRoom}
+          myName={myName}
+          setMyName={setMyName}
           onSetItemStatus={setRoomAuditItemStatus}
           onRemoveChecklistItem={removeChecklistItem}
           onAddCustomItem={addCustomAuditItem}
@@ -1128,20 +1200,19 @@ export default function DentalInventoryApp() {
           onBack={() => setView("rooms")}
         />
       )}
-      {view === "stock" && (
-        <CentralStock
+      {view === "trends" && (
+        <Trends items={items} history={history} setView={setView} />
+      )}
+      {view === "catalogue" && (
+        <Catalogue
           items={items}
-          trackedItems={trackedItems}
-          onEnableTracking={enableTracking}
-          onDisableTracking={disableTracking}
-          onSetThreshold={setThreshold}
-          onUpdateCount={updateCount}
+          onReloadCatalogue={reloadCatalogue}
+          onSetStatus={setItemStatus}
+          onRemoveItem={removeItem}
+          myName={myName}
+          setMyName={setMyName}
         />
       )}
-      {view === "trends" && (
-        <Trends items={items} history={history} onEnableTracking={enableTracking} setView={setView} />
-      )}
-      {view === "catalogue" && <Catalogue items={items} onReloadCatalogue={reloadCatalogue} />}
       {view === "orders" && (
         <OrderRequests
           orderRequests={orderRequests}
@@ -1151,7 +1222,7 @@ export default function DentalInventoryApp() {
         />
       )}
       {view === "feedback" && (
-        <Feedback feedback={feedback} onSubmit={submitFeedback} onReview={markFeedbackReviewed} />
+        <Feedback feedback={feedback} onSubmit={submitFeedback} onReview={markFeedbackReviewed} myName={myName} setMyName={setMyName} />
       )}
     </Shell>
   );
@@ -1165,7 +1236,6 @@ function Shell({ view, setView, saveError, children }) {
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "report", label: "Report low stock", icon: Flag },
     { id: "rooms", label: "By room", icon: Building2 },
-    { id: "stock", label: "Critical stock", icon: Package },
     { id: "trends", label: "Trends", icon: TrendingUp },
     { id: "catalogue", label: "Catalogue", icon: BookOpen },
     { id: "orders", label: "Order Requests", icon: ShoppingCart },
@@ -1235,7 +1305,7 @@ function RoomGroup({ room, count, children }) {
   );
 }
 
-function Dashboard({ items, itemsById, activeFlags, autoLowItems, openOrders, missingAuditItems, roomsAffected, myRoom, setView, onRebuildFlags }) {
+function Dashboard({ items, itemsById, activeFlags, backorderedItems, roomAudits, openOrders, missingAuditItems, roomsAffected, myRoom, myName, setView, onToggle, onSetItemStatus, onSetCustomStatus, onRebuildFlags }) {
   const [confirmingRebuild, setConfirmingRebuild] = useState(false);
   const [rebuildResult, setRebuildResult] = useState(null); // null | { count: number }
 
@@ -1258,12 +1328,20 @@ function Dashboard({ items, itemsById, activeFlags, autoLowItems, openOrders, mi
   });
   const missingRoomEntries = Object.entries(missingByRoom).sort((a, b) => roomOrder(a[0]) - roomOrder(b[0]));
 
+  const resolveMissing = (m) => {
+    if (m.type === "checklist") {
+      onSetItemStatus(m.room, m.itemId, "ok", myName || "");
+    } else {
+      onSetCustomStatus(m.room, m.itemId, "ok", myName || "");
+    }
+  };
+
   return (
     <div className="di-page">
       <PageHeader
         eyebrow="Right now"
         title="What's flagged low"
-        sub="Rooms flag items by hand. A handful of high-burn items are tracked with real counts and flag themselves."
+        sub="Rooms flag items by hand -- restock and mark items resolved right here, no need to go elsewhere."
       />
 
       {!myRoom && (
@@ -1280,7 +1358,7 @@ function Dashboard({ items, itemsById, activeFlags, autoLowItems, openOrders, mi
       <div className="di-stats">
         <StatCard label="Items in catalogue" value={items.length} />
         <StatCard label="Room flags" value={activeFlags.length} tone={activeFlags.length > 0 ? "critical" : "default"} />
-        <StatCard label="Central items low" value={autoLowItems.length} tone={autoLowItems.length > 0 ? "critical" : "default"} />
+        <StatCard label="On backorder" value={backorderedItems.length} tone={backorderedItems.length > 0 ? "watch" : "default"} />
         <StatCard label="Open orders" value={openOrders.length} tone={openOrders.length > 0 ? "watch" : "default"} />
         <StatCard
           label="Total items Missing"
@@ -1291,31 +1369,23 @@ function Dashboard({ items, itemsById, activeFlags, autoLowItems, openOrders, mi
 
       <div className="di-panel">
         <div className="di-panel-head">
-          <h3>Critical stock running low</h3>
-          <span className="di-panel-count">{autoLowItems.length}</span>
+          <h3>On backorder</h3>
+          <span className="di-panel-count">{backorderedItems.length}</span>
         </div>
-        {autoLowItems.length === 0 ? (
-          <EmptyState
-            icon={CircleCheck}
-            text="Nothing tracked is below its threshold. Set this up on the Critical stock page."
-          />
+        {backorderedItems.length === 0 ? (
+          <EmptyState icon={CircleCheck} text="Nothing currently on backorder." />
         ) : (
           <ul className="di-alert-list">
-            {autoLowItems.map((item) => (
+            {backorderedItems.map((item) => (
               <li key={item.id} className="di-alert-row">
-                <span className="di-status-dot" style={{ background: "var(--red)" }} />
+                <span className="di-status-dot" style={{ background: "var(--clay)" }} />
                 <div className="di-alert-main">
                   <div className="di-alert-name">{item.name}</div>
-                  <div className="di-alert-meta">
-                    {item.category} · counted {item.lastCountedAt ? timeAgo(item.lastCountedAt) : "recently"}
-                    {item.lastCountedBy ? ` by ${item.lastCountedBy}` : ""}
-                  </div>
+                  <div className="di-alert-meta">{item.category}</div>
                 </div>
                 <div className="di-alert-figures">
-                  <div className="di-alert-stock">
-                    {item.currentCount} on hand
-                    <span className="di-alert-par"> · threshold {item.lowThreshold}</span>
-                  </div>
+                  <div className="di-alert-stock">{item.statusUpdatedAt ? timeAgo(item.statusUpdatedAt) : ""}</div>
+                  {item.statusUpdatedBy && <div className="di-alert-days">by {item.statusUpdatedBy}</div>}
                 </div>
               </li>
             ))}
@@ -1347,6 +1417,13 @@ function Dashboard({ items, itemsById, activeFlags, autoLowItems, openOrders, mi
                       <div className="di-alert-stock">{timeAgo(f.flaggedAt)}</div>
                       {f.staff && <div className="di-alert-days">flagged by {f.staff}</div>}
                     </div>
+                    <button
+                      className="di-small-btn di-small-btn-ghost"
+                      style={{ marginLeft: 8 }}
+                      onClick={() => onToggle({ itemId: item.id, room, staff: myName || "" })}
+                    >
+                      <Undo2 size={13} /> Restock
+                    </button>
                   </li>
                 );
               })}
@@ -1375,11 +1452,46 @@ function Dashboard({ items, itemsById, activeFlags, autoLowItems, openOrders, mi
                     <div className="di-alert-stock">{m.updatedAt ? timeAgo(m.updatedAt) : ""}</div>
                     {m.updatedBy && <div className="di-alert-days">by {m.updatedBy}</div>}
                   </div>
+                  <button
+                    className="di-small-btn di-small-btn-ghost"
+                    style={{ marginLeft: 8 }}
+                    onClick={() => resolveMissing(m)}
+                  >
+                    <CircleCheck size={13} /> Restored
+                  </button>
                 </li>
               ))}
             </RoomGroup>
           ))
         )}
+      </div>
+
+      <div className="di-panel">
+        <div className="di-panel-head">
+          <h3>Audits</h3>
+          <button className="di-ghost-btn" onClick={() => setView("rooms")}>
+            <ClipboardList size={13} /> Go to audits
+          </button>
+        </div>
+        <ul className="di-alert-list">
+          {roomAudits.map(({ room, audit }) => (
+            <li key={room} className="di-alert-row">
+              <span className="di-status-dot" style={{ background: audit ? "var(--green)" : "var(--amber)" }} />
+              <div className="di-alert-main">
+                <div className="di-alert-name">{room}</div>
+                {audit && (
+                  <div className="di-alert-meta">
+                    {audit.reviewedCount} reviewed{audit.flaggedCount > 0 ? ` · ${audit.flaggedCount} flagged` : ""}
+                  </div>
+                )}
+              </div>
+              <div className="di-alert-figures">
+                <div className="di-alert-stock">{audit ? timeAgo(audit.date) : "Not yet audited"}</div>
+                {audit && audit.staff && <div className="di-alert-days">by {audit.staff}</div>}
+              </div>
+            </li>
+          ))}
+        </ul>
       </div>
 
       <div className="di-reset-row">
@@ -1466,7 +1578,7 @@ function PageHeader({ eyebrow, title, sub }) {
 /* ============================================================================
    REPORT LOW STOCK -- the screen every room actually uses
 ============================================================================ */
-function ReportLowStock({ items, activeFlags, myRoom, setMyRoom, onToggle }) {
+function ReportLowStock({ items, activeFlags, myRoom, setMyRoom, myName, setMyName, onToggle }) {
   const [room, setRoom] = useState(myRoom || ROOMS[0]);
   const [query, setQuery] = useState("");
   const [staff, setStaff] = useState("");
@@ -1475,6 +1587,10 @@ function ReportLowStock({ items, activeFlags, myRoom, setMyRoom, onToggle }) {
   useEffect(() => {
     if (myRoom) setRoom(myRoom);
   }, [myRoom]);
+
+  useEffect(() => {
+    if (myName) setStaff(myName);
+  }, [myName]);
 
   const flagsForRoom = activeFlags.filter((f) => f.room === room);
   const flaggedIds = new Set(flagsForRoom.map((f) => f.itemId));
@@ -1529,7 +1645,12 @@ function ReportLowStock({ items, activeFlags, myRoom, setMyRoom, onToggle }) {
         </div>
         <div className="di-field" style={{ maxWidth: 220 }}>
           <label>Your name (optional)</label>
-          <input placeholder="e.g. Jess" value={staff} onChange={(e) => setStaff(e.target.value)} />
+          <input
+            placeholder="e.g. Jess"
+            value={staff}
+            onChange={(e) => setStaff(e.target.value)}
+            onBlur={() => staff && setMyName(staff)}
+          />
         </div>
       </div>
 
@@ -1613,11 +1734,15 @@ function ReportLowStock({ items, activeFlags, myRoom, setMyRoom, onToggle }) {
    ROOMS OVERVIEW
 ============================================================================ */
 function RoomsOverview({ items, activeFlags, missingAuditItems, onToggle, onOpenAudit }) {
+  // Deliberately NOT sorted by how many items are flagged/missing -- a
+  // fixed order (matching the physical rooms) means a card never jumps
+  // somewhere else on screen the moment you restock it, which is exactly
+  // what made this list hard to work through during a real restock.
   const byRoom = ROOMS.map((room) => ({
     room,
     flags: activeFlags.filter((f) => f.room === room),
     missing: missingAuditItems.filter((m) => m.room === room),
-  })).sort((a, b) => b.flags.length + b.missing.length - (a.flags.length + a.missing.length));
+  }));
 
   const isTreatmentRoom = (room) => room !== "Sterilisation" && room !== "Lab";
 
@@ -1718,6 +1843,8 @@ function AuditRoom({
   roomStatus,
   customItems,
   myRoom,
+  myName,
+  setMyName,
   onSetItemStatus,
   onRemoveChecklistItem,
   onAddCustomItem,
@@ -1728,6 +1855,10 @@ function AuditRoom({
 }) {
   const [staff, setStaff] = useState("");
   const [customText, setCustomText] = useState("");
+
+  useEffect(() => {
+    if (myName) setStaff(myName);
+  }, [myName]);
 
   if (!room) {
     return (
@@ -1770,7 +1901,12 @@ function AuditRoom({
       <div className="di-panel">
         <div className="di-field" style={{ maxWidth: 220 }}>
           <label>Your name (optional)</label>
-          <input placeholder="e.g. Jess" value={staff} onChange={(e) => setStaff(e.target.value)} />
+          <input
+            placeholder="e.g. Jess"
+            value={staff}
+            onChange={(e) => setStaff(e.target.value)}
+            onBlur={() => staff && setMyName(staff)}
+          />
         </div>
       </div>
 
@@ -1904,188 +2040,7 @@ function AuditSection({ section, sectionItems, roomStatus, onSetStatus, onRemove
 }
 
 
-/* ============================================================================
-   CENTRAL STOCK -- option 2: occasional real counts, per-item threshold,
-   auto-flags itself. This is deliberately separate from the per-room manual
-   flags: it represents one shared, central number (e.g. the steri /
-   storeroom shelf), not what's sitting in each of the 17 treatment rooms.
-============================================================================ */
-function CentralStock({ items, trackedItems, onEnableTracking, onDisableTracking, onSetThreshold, onUpdateCount }) {
-  const [query, setQuery] = useState("");
-  const [staff, setStaff] = useState("");
-  const [editingCountId, setEditingCountId] = useState(null);
-  const [countDraft, setCountDraft] = useState("");
-  const [addingId, setAddingId] = useState(null);
-  const [thresholdDraft, setThresholdDraft] = useState("");
-
-  const untracked = items.filter((i) => !i.tracked);
-  const matches =
-    query.length > 0
-      ? untracked
-          .filter(
-            (i) =>
-              i.name.toLowerCase().includes(query.toLowerCase()) ||
-              i.code.toLowerCase().includes(query.toLowerCase())
-          )
-          .slice(0, 8)
-      : [];
-
-  const startCount = (item) => {
-    setEditingCountId(item.id);
-    setCountDraft(item.currentCount !== null ? String(item.currentCount) : "");
-  };
-  const saveCount = (itemId) => {
-    const val = parseInt(countDraft, 10);
-    if (!Number.isNaN(val) && val >= 0) onUpdateCount(itemId, val, staff);
-    setEditingCountId(null);
-  };
-
-  const confirmAdd = (itemId) => {
-    const val = parseInt(thresholdDraft, 10);
-    if (!Number.isNaN(val) && val >= 0) {
-      onEnableTracking(itemId, val);
-      setAddingId(null);
-      setThresholdDraft("");
-      setQuery("");
-    }
-  };
-
-  return (
-    <div className="di-page">
-      <PageHeader
-        eyebrow="Precision tracking"
-        title="Real counts for critical items"
-        sub="For your highest-burn items only. Type in the real count when it's convenient -- not every use -- and the item flags itself once it hits its threshold."
-      />
-
-      <div className="di-panel">
-        <div className="di-field" style={{ maxWidth: 220, marginBottom: 14 }}>
-          <label>Your name (optional, saved with each count)</label>
-          <input placeholder="e.g. Jess" value={staff} onChange={(e) => setStaff(e.target.value)} />
-        </div>
-
-        {trackedItems.length === 0 ? (
-          <EmptyState icon={Info} text="No items tracked yet -- add one below to get started." />
-        ) : (
-          <ul className="di-activity-list">
-            {trackedItems.map((item) => {
-              const isLow =
-                item.currentCount !== null && item.lowThreshold !== null && item.currentCount <= item.lowThreshold;
-              return (
-                <li key={item.id} className="di-activity-row di-stock-row">
-                  <div className="di-activity-main">
-                    <div className="di-cell-name">{item.name}</div>
-                    <div className="di-cell-sub">
-                      {item.lastCountedAt
-                        ? `Last counted ${timeAgo(item.lastCountedAt)}${item.lastCountedBy ? ` by ${item.lastCountedBy}` : ""}`
-                        : "Never counted yet"}
-                    </div>
-                  </div>
-
-                  <div className="di-stock-figures">
-                    {editingCountId === item.id ? (
-                      <>
-                        <input
-                          className="di-inline-input"
-                          type="number"
-                          min="0"
-                          autoFocus
-                          value={countDraft}
-                          onChange={(e) => setCountDraft(e.target.value)}
-                          onKeyDown={(e) => e.key === "Enter" && saveCount(item.id)}
-                        />
-                        <button className="di-small-btn" onClick={() => saveCount(item.id)}>Save</button>
-                      </>
-                    ) : (
-                      <>
-                        <span className={`di-badge ${isLow ? "" : ""}`} style={{
-                          color: isLow ? "var(--red)" : "var(--green)",
-                          background: isLow ? "var(--red-bg)" : "var(--green-bg)",
-                        }}>
-                          {item.currentCount === null ? "Not counted" : `${item.currentCount} on hand`}
-                        </span>
-                        <button className="di-small-btn di-small-btn-ghost" onClick={() => startCount(item)}>
-                          Update count
-                        </button>
-                      </>
-                    )}
-                  </div>
-
-                  <div className="di-stock-threshold">
-                    <label>Threshold</label>
-                    <input
-                      className="di-inline-input di-inline-input-sm"
-                      type="number"
-                      min="0"
-                      value={item.lowThreshold ?? ""}
-                      onChange={(e) => onSetThreshold(item.id, parseInt(e.target.value || "0", 10))}
-                    />
-                  </div>
-
-                  <button className="di-ghost-btn" onClick={() => onDisableTracking(item.id)}>
-                    Stop tracking
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-
-      <div className="di-panel">
-        <div className="di-panel-head">
-          <h3>Add an item to central tracking</h3>
-        </div>
-        <div className="di-search di-search-wide">
-          <Search size={15} />
-          <input
-            placeholder="Search item name or code…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-        </div>
-        {matches.length > 0 && (
-          <ul className="di-activity-list" style={{ marginTop: 10 }}>
-            {matches.map((m) => (
-              <li key={m.id} className="di-activity-row">
-                <div className="di-activity-main">
-                  <div className="di-cell-name">{m.name}</div>
-                  <div className="di-cell-sub">{m.category}</div>
-                </div>
-                {addingId === m.id ? (
-                  <div className="di-field-row">
-                    <input
-                      className="di-inline-input"
-                      type="number"
-                      min="0"
-                      placeholder="Threshold"
-                      autoFocus
-                      value={thresholdDraft}
-                      onChange={(e) => setThresholdDraft(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && confirmAdd(m.id)}
-                    />
-                    <button className="di-small-btn" onClick={() => confirmAdd(m.id)}>
-                      <Target size={13} /> Set
-                    </button>
-                  </div>
-                ) : (
-                  <button className="di-small-btn" onClick={() => setAddingId(m.id)}>
-                    <PlusCircle size={13} /> Track this item
-                  </button>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ============================================================================
-   TRENDS -- flag frequency stands in for burn rate in this beta
-============================================================================ */
-function Trends({ items, history, onEnableTracking, setView }) {
+function Trends({ items, history, setView }) {
   const ranked = items
     .map((item) => ({
       item,
@@ -2145,21 +2100,6 @@ function Trends({ items, history, onEnableTracking, setView }) {
                         : "Not enough history to estimate a pattern yet"}
                     </div>
                   </div>
-                  {r.item.tracked ? (
-                    <span className="di-badge" style={{ color: "var(--clay)", background: "var(--paper)" }}>
-                      Tracked centrally
-                    </span>
-                  ) : (
-                    <button
-                      className="di-small-btn"
-                      onClick={() => {
-                        onEnableTracking(r.item.id, 5);
-                        setView("stock");
-                      }}
-                    >
-                      <Target size={13} /> Track this item
-                    </button>
-                  )}
                 </li>
               ))}
             </ul>
@@ -2173,11 +2113,17 @@ function Trends({ items, history, onEnableTracking, setView }) {
 /* ============================================================================
    CATALOGUE -- simple read-only browse (names, cost, supplier)
 ============================================================================ */
-function Catalogue({ items, onReloadCatalogue }) {
+function Catalogue({ items, onReloadCatalogue, onSetStatus, onRemoveItem, myName, setMyName }) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("All");
+  const [staff, setStaff] = useState("");
   const [confirmingReload, setConfirmingReload] = useState(false);
   const [reloadStatus, setReloadStatus] = useState(null); // null | "working" | "done" | "error"
+  const [confirmingRemoveId, setConfirmingRemoveId] = useState(null);
+
+  useEffect(() => {
+    if (myName) setStaff(myName);
+  }, [myName]);
 
   const categories = useMemo(() => {
     const set = new Set(items.map((i) => i.category));
@@ -2195,7 +2141,11 @@ function Catalogue({ items, onReloadCatalogue }) {
 
   return (
     <div className="di-page">
-      <PageHeader eyebrow="Reference" title="Catalogue" sub="Every item that DB stocks, searchable by name!" />
+      <PageHeader
+        eyebrow="Reference"
+        title="Catalogue"
+        sub="Every item you stock, searchable by name or code. Flip an item to backorder once it's actually been ordered from a supplier."
+      />
       <div className="di-toolbar">
         <div className="di-search">
           <Search size={15} />
@@ -2208,24 +2158,85 @@ function Catalogue({ items, onReloadCatalogue }) {
         </select>
         <div className="di-toolbar-count">{filtered.length} items</div>
       </div>
+      <div className="di-field" style={{ maxWidth: 220, marginBottom: 12 }}>
+        <label>Your name (saved with status changes)</label>
+        <input
+          placeholder="e.g. Jess"
+          value={staff}
+          onChange={(e) => setStaff(e.target.value)}
+          onBlur={() => staff && setMyName(staff)}
+        />
+      </div>
       <div className="di-table-wrap">
         <table className="di-table">
           <thead>
             <tr>
               <th>Item</th>
               <th>Category</th>
+              <th>Status</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
-            {filtered.map((item) => (
-              <tr key={item.id}>
-                <td>
-                  <div className="di-cell-name">{item.name}</div>
-                  <div className="di-cell-sub">{item.code || "no code"}</div>
-                </td>
-                <td>{item.category}</td>
-              </tr>
-            ))}
+            {filtered.map((item) => {
+              const meta = itemStatusMeta(item.status);
+              return (
+                <tr key={item.id}>
+                  <td>
+                    <div className="di-cell-name">{item.name}</div>
+                    <div className="di-cell-sub">{item.code || "no code"}</div>
+                  </td>
+                  <td>{item.category}</td>
+                  <td>
+                    <select
+                      className="di-status-select"
+                      value={item.status || "in_stock"}
+                      style={{ color: meta.color, background: meta.bg, borderColor: meta.color }}
+                      onChange={(e) => onSetStatus(item.id, e.target.value, staff)}
+                    >
+                      {ITEM_STATUSES.map((s) => (
+                        <option key={s.value} value={s.value}>
+                          {s.label}
+                        </option>
+                      ))}
+                    </select>
+                    {item.status === "backorder" && item.statusUpdatedAt && (
+                      <div className="di-cell-sub" style={{ marginTop: 3 }}>
+                        {timeAgo(item.statusUpdatedAt)}
+                        {item.statusUpdatedBy ? ` by ${item.statusUpdatedBy}` : ""}
+                      </div>
+                    )}
+                  </td>
+                  <td>
+                    {confirmingRemoveId === item.id ? (
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          className="di-small-btn"
+                          style={{ background: "var(--red)", borderColor: "var(--red)" }}
+                          onClick={() => {
+                            onRemoveItem(item.id);
+                            setConfirmingRemoveId(null);
+                          }}
+                        >
+                          Remove
+                        </button>
+                        <button className="di-ghost-btn" onClick={() => setConfirmingRemoveId(null)}>
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        className="di-audit-btn-remove"
+                        onClick={() => setConfirmingRemoveId(item.id)}
+                        title="Remove from catalogue"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -2247,9 +2258,10 @@ function Catalogue({ items, onReloadCatalogue }) {
           <div className="di-banner" style={{ borderLeftColor: "var(--red)" }}>
             <AlertTriangle size={16} />
             <div>
-              <strong>This replaces every item's name, category and central-stock tracking</strong> with
-              whatever is currently in the app's code. Room flags and flag history are untouched. Any
-              tracking/thresholds set by hand on the Critical Stock page will be reset. This step actually
+              <strong>This updates every item's name, category, and other catalogue details</strong> from
+              whatever is currently in the app's code. Room flags, flag history, Central Stock tracking, and
+              item status are all preserved for items that already exist -- and any item that only exists
+              live (e.g. one added directly in Firebase) is left untouched too. This step actually
               performs the reload -- clicking below is what writes it, not the button before it.
               <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}>
                 <button
@@ -2479,11 +2491,15 @@ function OrderRequests({ orderRequests, myRoom, onSubmit, onFulfill }) {
    so "private to the owner" isn't something this can technically enforce --
    it's a shared channel everyone can see, same as every other page here.
 ============================================================================ */
-function Feedback({ feedback, onSubmit, onReview }) {
+function Feedback({ feedback, onSubmit, onReview, myName, setMyName }) {
   const [message, setMessage] = useState("");
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
   const [justSubmitted, setJustSubmitted] = useState(false);
+
+  useEffect(() => {
+    if (myName) setName(myName);
+  }, [myName]);
 
   const canSubmit = message.trim().length > 0;
 
@@ -2523,7 +2539,12 @@ function Feedback({ feedback, onSubmit, onReview }) {
         <div className="di-field-row">
           <div className="di-field">
             <label>Your name (optional)</label>
-            <input placeholder="e.g. Jess" value={name} onChange={(e) => setName(e.target.value)} />
+            <input
+              placeholder="e.g. Jess"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onBlur={() => name && setMyName(name)}
+            />
           </div>
           <div className="di-field">
             <label>Role (optional)</label>
@@ -2773,6 +2794,10 @@ const CSS = `
 .di-cell-name { font-weight: 500; }
 .di-cell-sub { font-size: 11px; color: var(--ink-soft); margin-top: 1px; }
 .di-badge { font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 20px; white-space: nowrap; }
+.di-status-select {
+  font-size: 12px; font-weight: 600; font-family: inherit; border-radius: 20px;
+  padding: 4px 10px; border-width: 1.5px; border-style: solid; cursor: pointer;
+}
 .di-small-btn {
   display: inline-flex; align-items: center; gap: 5px;
   border: 1px solid var(--clay); background: var(--clay); color: #fff;
