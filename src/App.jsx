@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { doc, onSnapshot, setDoc, updateDoc, deleteDoc, collection, query, orderBy, limit } from "firebase/firestore";
 import { db } from "./firebase.js";
 import {
@@ -25,6 +25,7 @@ import {
   ClipboardList,
   ChevronDown,
   ChevronRight,
+  Bell,
 } from "lucide-react";
 import {
   BarChart,
@@ -330,6 +331,29 @@ function timeAgo(iso) {
   return `${days}d ago`;
 }
 
+// A short, synthesized double-beep for new urgent alerts -- no audio file
+// needed. Browsers can block audio before the user has interacted with the
+// page at all; this fails silently in that case rather than throwing, since
+// a missing beep shouldn't stop the banner itself from showing.
+function playAlertBeep() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioCtx();
+    [0, 0.18].forEach((delay) => {
+      const oscillator = ctx.createOscillator();
+      const gain = ctx.createGain();
+      oscillator.connect(gain);
+      gain.connect(ctx.destination);
+      oscillator.frequency.value = 880;
+      gain.gain.setValueAtTime(0.001, ctx.currentTime + delay);
+      gain.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime + delay + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + 0.16);
+      oscillator.start(ctx.currentTime + delay);
+      oscillator.stop(ctx.currentTime + delay + 0.18);
+    });
+  } catch (e) {}
+}
+
 // Turns any string into a URL/ID-safe slug: lowercase, letters/numbers only,
 // words joined with hyphens. Used to build stable item IDs from names.
 function slugify(str) {
@@ -450,6 +474,7 @@ export default function DentalInventoryApp() {
   const [history, setHistory] = useState(null); // append-only [{id, itemId, room, action, staff, date}]
   const [orderRequests, setOrderRequests] = useState(null); // [{id, room, dentistName, product, type, dayQty, nightQty, status, date, ...}]
   const [feedback, setFeedback] = useState(null); // [{id, message, name, role, date, status}]
+  const [urgentAlerts, setUrgentAlerts] = useState(null); // [{id, room, message, staff, status, createdAt, resolvedBy, resolvedAt}]
   const [auditChecklist, setAuditChecklist] = useState(null); // [itemId, ...] -- shared base list, same for every treatment room
   const [roomCustomAuditItems, setRoomCustomAuditItems] = useState(null); // { [room]: [{id, text, status, updatedAt, updatedBy}] }
   const [roomAuditStatus, setRoomAuditStatus] = useState(null); // { [room]: { [checklistItemId]: {status, updatedAt, updatedBy} } }
@@ -499,12 +524,14 @@ export default function DentalInventoryApp() {
     const historyQuery = query(collection(db, "flagHistoryEvents"), orderBy("date", "desc"), limit(2000));
     const ordersQuery = query(collection(db, "orderRequests"), orderBy("date", "desc"));
     const feedbackQuery = query(collection(db, "feedback"), orderBy("date", "desc"));
+    const urgentAlertsQuery = query(collection(db, "urgentAlerts"), orderBy("createdAt", "desc"));
 
     let itemsLoaded = false;
     let flagsLoaded = false;
     let historyLoaded = false;
     let ordersLoaded = false;
     let feedbackLoaded = false;
+    let urgentAlertsLoaded = false;
     let auditChecklistLoaded = false;
     let roomCustomAuditItemsLoaded = false;
     let roomAuditStatusLoaded = false;
@@ -515,6 +542,7 @@ export default function DentalInventoryApp() {
         historyLoaded &&
         ordersLoaded &&
         feedbackLoaded &&
+        urgentAlertsLoaded &&
         auditChecklistLoaded &&
         roomCustomAuditItemsLoaded &&
         roomAuditStatusLoaded
@@ -579,6 +607,16 @@ export default function DentalInventoryApp() {
       (snap) => {
         setFeedback(snap.docs.map((d) => d.data()).reverse());
         feedbackLoaded = true;
+        maybeStopLoading();
+      },
+      () => setSaveError("Couldn't reach the database -- check firebase.js is filled in.")
+    );
+
+    const unsubUrgentAlerts = onSnapshot(
+      urgentAlertsQuery,
+      (snap) => {
+        setUrgentAlerts(snap.docs.map((d) => d.data()).reverse());
+        urgentAlertsLoaded = true;
         maybeStopLoading();
       },
       () => setSaveError("Couldn't reach the database -- check firebase.js is filled in.")
@@ -671,6 +709,7 @@ export default function DentalInventoryApp() {
       unsubHistory();
       unsubOrders();
       unsubFeedback();
+      unsubUrgentAlerts();
       unsubAuditChecklist();
       unsubRoomCustomAuditItems();
       unsubRoomAuditStatus();
@@ -777,6 +816,31 @@ export default function DentalInventoryApp() {
     } catch (e) {
       setSaveError("Couldn't save -- check your connection.");
     }
+  }, []);
+
+  // A live, urgent, clinic-wide alert -- shows as a banner on every device
+  // that has the app open, on every page, the instant it's sent. Separate
+  // collection so it never touches stock, flags, or audits.
+  const sendUrgentAlert = useCallback(({ room, message, staff }) => {
+    const entry = {
+      id: `urg_${Date.now()}_${Math.round(Math.random() * 9999)}`,
+      room,
+      message,
+      staff: staff || "",
+      status: "open",
+      createdAt: new Date().toISOString(),
+    };
+    setDoc(doc(collection(db, "urgentAlerts"), entry.id), entry).catch(() =>
+      setSaveError("Couldn't send -- check your connection.")
+    );
+  }, []);
+
+  const resolveUrgentAlert = useCallback((id, staff) => {
+    updateDoc(doc(db, "urgentAlerts", id), {
+      status: "resolved",
+      resolvedBy: staff || "",
+      resolvedAt: new Date().toISOString(),
+    }).catch(() => setSaveError("Couldn't save -- check your connection."));
   }, []);
 
   // ---- room auditing: base checklist (shared, real catalogue items) ------
@@ -1081,6 +1145,28 @@ export default function DentalInventoryApp() {
     [orderRequests]
   );
 
+  const openAlerts = useMemo(
+    () => (urgentAlerts ? urgentAlerts.filter((a) => a.status === "open") : []),
+    [urgentAlerts]
+  );
+
+  // Play the beep only for alerts that are genuinely new since this device
+  // last checked -- never on first load (which would otherwise blast sound
+  // for every alert already open when the app starts), and never twice for
+  // the same alert.
+  const seenAlertIdsRef = useRef(null);
+  useEffect(() => {
+    if (!urgentAlerts) return;
+    const currentIds = new Set(urgentAlerts.filter((a) => a.status === "open").map((a) => a.id));
+    if (seenAlertIdsRef.current === null) {
+      seenAlertIdsRef.current = currentIds;
+      return;
+    }
+    const hasNew = [...currentIds].some((id) => !seenAlertIdsRef.current.has(id));
+    if (hasNew) playAlertBeep();
+    seenAlertIdsRef.current = currentIds;
+  }, [urgentAlerts]);
+
   // Every checklist item or personalised item currently crossed as missing,
   // across every room -- purely derived from the audit data, completely
   // separate from stock flags.
@@ -1139,7 +1225,7 @@ export default function DentalInventoryApp() {
   }
 
   return (
-    <Shell view={view} setView={setView} saveError={saveError}>
+    <Shell view={view} setView={setView} saveError={saveError} openAlerts={openAlerts} onResolveAlert={resolveUrgentAlert} myName={myName}>
       {view === "dashboard" && (
         <Dashboard
           items={items}
@@ -1221,6 +1307,9 @@ export default function DentalInventoryApp() {
           onFulfill={fulfillOrderRequest}
         />
       )}
+      {view === "urgent" && (
+        <SendUrgentAlert myRoom={myRoom} myName={myName} setMyName={setMyName} onSend={sendUrgentAlert} />
+      )}
       {view === "feedback" && (
         <Feedback feedback={feedback} onSubmit={submitFeedback} onReview={markFeedbackReviewed} myName={myName} setMyName={setMyName} />
       )}
@@ -1231,10 +1320,11 @@ export default function DentalInventoryApp() {
 /* ============================================================================
    SHELL / NAV
 ============================================================================ */
-function Shell({ view, setView, saveError, children }) {
+function Shell({ view, setView, saveError, openAlerts, onResolveAlert, myName, children }) {
   const nav = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "report", label: "Report low stock", icon: Flag },
+    { id: "urgent", label: "Urgent Alert", icon: Bell },
     { id: "rooms", label: "By room", icon: Building2 },
     { id: "trends", label: "Trends", icon: TrendingUp },
     { id: "catalogue", label: "Catalogue", icon: BookOpen },
@@ -1244,6 +1334,25 @@ function Shell({ view, setView, saveError, children }) {
   return (
     <div className="di-root">
       <style>{CSS}</style>
+      {openAlerts && openAlerts.length > 0 && (
+        <div className="di-urgent-stack">
+          {openAlerts.map((a) => (
+            <div key={a.id} className="di-urgent-banner">
+              <Bell size={18} className="di-urgent-banner-icon" />
+              <div className="di-urgent-banner-main">
+                <div className="di-urgent-banner-title">{a.room} needs help</div>
+                <div className="di-urgent-banner-message">
+                  {a.message}
+                  {a.staff ? ` — ${a.staff}` : ""}
+                </div>
+              </div>
+              <button className="di-urgent-banner-btn" onClick={() => onResolveAlert(a.id, myName || "")}>
+                Mark handled
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <aside className="di-rail">
         <div className="di-brand">
           <div className="di-brand-mark">DB</div>
@@ -2487,6 +2596,85 @@ function OrderRequests({ orderRequests, myRoom, onSubmit, onFulfill }) {
 }
 
 /* ============================================================================
+   URGENT ALERT -- deliberately minimal. The whole point is speed in a
+   genuinely urgent moment, so this is room + message + one big button,
+   nothing to configure or think about.
+============================================================================ */
+function SendUrgentAlert({ myRoom, myName, setMyName, onSend }) {
+  const [room, setRoom] = useState(myRoom || ROOMS[0]);
+  const [message, setMessage] = useState("");
+  const [staff, setStaff] = useState("");
+  const [justSent, setJustSent] = useState(false);
+
+  useEffect(() => {
+    if (myRoom) setRoom(myRoom);
+  }, [myRoom]);
+
+  useEffect(() => {
+    if (myName) setStaff(myName);
+  }, [myName]);
+
+  const send = () => {
+    if (!message.trim()) return;
+    onSend({ room, message: message.trim(), staff });
+    setMessage("");
+    setJustSent(true);
+    setTimeout(() => setJustSent(false), 2500);
+  };
+
+  return (
+    <div className="di-page">
+      <PageHeader
+        eyebrow="For genuine emergencies"
+        title="Urgent Alert"
+        sub="This shows up instantly, on every screen, on every device that has the app open right now."
+      />
+
+      <div className="di-panel">
+        <div className="di-field-row">
+          <div className="di-field">
+            <label>Room</label>
+            <select value={room} onChange={(e) => setRoom(e.target.value)}>
+              {ROOMS.map((r) => (
+                <option key={r}>{r}</option>
+              ))}
+            </select>
+          </div>
+          <div className="di-field">
+            <label>Your name (optional)</label>
+            <input
+              placeholder="e.g. Jess"
+              value={staff}
+              onChange={(e) => setStaff(e.target.value)}
+              onBlur={() => staff && setMyName(staff)}
+            />
+          </div>
+        </div>
+
+        <div className="di-field" style={{ marginTop: 12 }}>
+          <label>What do you need?</label>
+          <input
+            placeholder="e.g. Need composite ASAP, need another pair of hands…"
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && send()}
+          />
+        </div>
+
+        <button className="di-urgent-send-btn" disabled={!message.trim()} onClick={send}>
+          <Bell size={16} /> Send urgent alert
+        </button>
+        {justSent && (
+          <div className="di-toast" style={{ marginTop: 10 }}>
+            <CircleCheck size={14} /> Sent to every device right now
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
    FEEDBACK -- anyone can submit, but there's no login system in this app,
    so "private to the owner" isn't something this can technically enforce --
    it's a shared channel everyone can see, same as every other page here.
@@ -2693,6 +2881,35 @@ const CSS = `
 }
 .di-spin { animation: di-spin 0.9s linear infinite; }
 @keyframes di-spin { to { transform: rotate(360deg); } }
+.di-urgent-stack {
+  position: fixed; top: 0; left: 208px; right: 0; z-index: 9999;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.di-urgent-banner {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--red); color: #fff; padding: 12px 20px;
+  animation: di-urgent-pulse 1.4s ease-in-out infinite;
+}
+@keyframes di-urgent-pulse {
+  0%, 100% { background: var(--red); }
+  50% { background: #c24632; }
+}
+.di-urgent-banner-icon { flex-shrink: 0; }
+.di-urgent-banner-main { flex: 1; min-width: 0; }
+.di-urgent-banner-title { font-weight: 700; font-size: 14px; }
+.di-urgent-banner-message { font-size: 12.5px; opacity: 0.92; }
+.di-urgent-banner-btn {
+  flex-shrink: 0; background: #fff; color: var(--red); border: none;
+  border-radius: 7px; padding: 8px 14px; font-size: 12.5px; font-weight: 700;
+  cursor: pointer; font-family: inherit; white-space: nowrap;
+}
+.di-urgent-send-btn {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; background: var(--red); color: #fff; border: none; border-radius: 8px;
+  padding: 13px; font-size: 14px; font-weight: 700; cursor: pointer; font-family: inherit;
+  margin-top: 14px;
+}
+.di-urgent-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .di-save-error {
   display: flex; align-items: center; gap: 7px; background: var(--red-bg);
   color: var(--red); padding: 8px 12px; border-radius: 7px; font-size: 12.5px;
@@ -2893,5 +3110,6 @@ const CSS = `
   .di-main { padding: 20px; }
   .di-stats { grid-template-columns: repeat(2, 1fr); }
   .di-rooms-grid { grid-template-columns: 1fr; }
+  .di-urgent-stack { left: 0; }
 }
 `;

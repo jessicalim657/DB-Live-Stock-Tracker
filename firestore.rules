@@ -10,9 +10,9 @@
 //
 // "dentalBoutique" holds the catalogue and the currently-active flags
 // (both naturally small and bounded). "flagHistoryEvents", "orderRequests",
-// "feedback", "roomAuditStatus", and "roomCustomAuditItems" are all
-// separate top-level collections, one document per record, so they can
-// grow indefinitely and never collide with each other across devices.
+// "feedback", "roomAuditStatus", "roomCustomAuditItems", and "urgentAlerts"
+// are all separate top-level collections, one document per record, so they
+// can grow indefinitely and never collide with each other across devices.
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -32,6 +32,9 @@ service cloud.firestore {
       allow read, write: if true;
     }
     match /roomCustomAuditItems/{document} {
+      allow read, write: if true;
+    }
+    match /urgentAlerts/{document} {
       allow read, write: if true;
     }
   }
