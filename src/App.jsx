@@ -465,6 +465,135 @@ function avgDaysBetweenFlags(itemId, history) {
   return spanDays / (events.length - 1);
 }
 
+// Which items get flagged low the most, optionally scoped to one room (or
+// every room). This is the same "steri flags" ranking generalised -- any
+// room can be selected, not just Sterilisation.
+function itemDepletionRanking(items, history, room) {
+  const flags = history.filter((h) => h.action === "flagged" && (room === "All rooms" || h.room === room));
+  const counts = {};
+  flags.forEach((h) => {
+    counts[h.itemId] = (counts[h.itemId] || 0) + 1;
+  });
+  return Object.entries(counts)
+    .map(([itemId, count]) => {
+      const item = items.find((i) => i.id === itemId);
+      return item ? { item, count } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+}
+
+// Which rooms raise the most flags overall, regardless of item.
+function roomDemandRanking(history) {
+  const flags = history.filter((h) => h.action === "flagged");
+  const counts = {};
+  flags.forEach((h) => {
+    counts[h.room] = (counts[h.room] || 0) + 1;
+  });
+  return Object.entries(counts)
+    .map(([room, count]) => ({ room, count }))
+    .sort((a, b) => b.count - a.count);
+}
+
+// There's no real quantity data (that's exactly why Central Stock was
+// retired), so this can't measure true waste. What it CAN measure
+// honestly: for a given item, does one room need it noticeably more often
+// than the clinic average for that same item. A genuine, defensible
+// signal worth investigating -- not a verdict on why.
+function overconsumptionOutliers(items, history) {
+  const flags = history.filter((h) => h.action === "flagged");
+  const byItem = {};
+  flags.forEach((h) => {
+    (byItem[h.itemId] = byItem[h.itemId] || []).push(h);
+  });
+
+  const results = [];
+  Object.entries(byItem).forEach(([itemId, events]) => {
+    const byRoom = {};
+    events.forEach((h) => {
+      (byRoom[h.room] = byRoom[h.room] || []).push(h);
+    });
+
+    const roomGaps = {};
+    Object.entries(byRoom).forEach(([room, roomEvents]) => {
+      if (roomEvents.length < 2) return;
+      const sorted = [...roomEvents].sort((a, b) => new Date(a.date) - new Date(b.date));
+      const spanDays = (new Date(sorted[sorted.length - 1].date) - new Date(sorted[0].date)) / 86400000;
+      roomGaps[room] = spanDays / (sorted.length - 1);
+    });
+
+    const roomsWithGaps = Object.keys(roomGaps);
+    if (roomsWithGaps.length < 2) return; // need at least 2 rooms to compare fairly
+
+    const gapValues = Object.values(roomGaps);
+    const clinicAvgGap = gapValues.reduce((a, b) => a + b, 0) / gapValues.length;
+
+    roomsWithGaps.forEach((room) => {
+      const gap = roomGaps[room];
+      const ratio = clinicAvgGap / gap; // > 1 means this room needs it MORE often than average
+      if (ratio >= 1.5) {
+        const item = items.find((i) => i.id === itemId);
+        if (item) results.push({ item, room, gap, clinicAvgGap, ratio });
+      }
+    });
+  });
+
+  return results.sort((a, b) => b.ratio - a.ratio).slice(0, 10);
+}
+
+function formatDuration(ms) {
+  const hours = ms / 3600000;
+  if (hours < 1) return `${Math.max(1, Math.round(ms / 60000))}m`;
+  if (hours < 24) return `${hours.toFixed(1)}h`;
+  return `${(hours / 24).toFixed(1)}d`;
+}
+
+// Pairs every "flagged" event with the "resolved" event that closed it
+// (per item+room, matched chronologically), then reports the median time
+// between them -- clinic-wide and broken down by room. Median rather than
+// average, since one flag left open for a week shouldn't distort a number
+// that's otherwise mostly fast, everyday restocks.
+function computeResolutionStats(history) {
+  const relevant = history.filter((h) => h.action === "flagged" || h.action === "resolved");
+  const byKey = {};
+  relevant.forEach((h) => {
+    const key = `${h.itemId}::${h.room}`;
+    (byKey[key] = byKey[key] || []).push(h);
+  });
+
+  const durationsMs = [];
+  const byRoomDurations = {};
+  Object.values(byKey).forEach((events) => {
+    const sorted = [...events].sort((a, b) => new Date(a.date) - new Date(b.date));
+    let openAt = null;
+    sorted.forEach((e) => {
+      if (e.action === "flagged") {
+        openAt = e.date;
+      } else if (e.action === "resolved" && openAt) {
+        const ms = new Date(e.date) - new Date(openAt);
+        durationsMs.push(ms);
+        (byRoomDurations[e.room] = byRoomDurations[e.room] || []).push(ms);
+        openAt = null;
+      }
+    });
+  });
+
+  const median = (arr) => {
+    if (arr.length === 0) return null;
+    const sorted = [...arr].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  };
+
+  const overallMedian = median(durationsMs);
+  const roomMedians = Object.entries(byRoomDurations)
+    .map(([room, durations]) => ({ room, medianMs: median(durations), count: durations.length }))
+    .sort((a, b) => b.medianMs - a.medianMs);
+
+  return { overallMedian, count: durationsMs.length, roomMedians };
+}
+
 /* ============================================================================
    MAIN APP
 ============================================================================ */
@@ -2150,69 +2279,142 @@ function AuditSection({ section, sectionItems, roomStatus, onSetStatus, onRemove
 
 
 function Trends({ items, history, setView }) {
-  const ranked = items
-    .map((item) => ({
-      item,
-      count30: flagCountLast30Days(item.id, history),
-      avgGap: avgDaysBetweenFlags(item.id, history),
-    }))
-    .filter((r) => r.count30 > 0)
-    .sort((a, b) => b.count30 - a.count30)
-    .slice(0, 10);
+  const [depletionRoom, setDepletionRoom] = useState("Sterilisation");
+
+  const depletionRanking = itemDepletionRanking(items, history, depletionRoom);
+  const roomDemand = roomDemandRanking(history);
+  const overconsumption = overconsumptionOutliers(items, history);
+  const resolutionStats = computeResolutionStats(history);
 
   return (
     <div className="di-page">
       <PageHeader
         eyebrow="Patterns"
-        title="Most frequently flagged"
-        sub="This counts how often each item gets flagged low. Dark red discs are culprit #1 🤣."
+        title="Trends"
+        sub="Real numbers from every flag and resolve logged since day one -- Dark red discs are still culprit #1 🤣."
       />
 
+      <div className="di-stats">
+        <StatCard
+          label="Median time to restock"
+          value={resolutionStats.overallMedian !== null ? formatDuration(resolutionStats.overallMedian) : "—"}
+        />
+        <StatCard label="Flags resolved (all time)" value={resolutionStats.count} />
+        <StatCard label="Rooms with flag history" value={roomDemand.length} />
+      </div>
+
       <div className="di-panel">
-        {ranked.length === 0 ? (
-          <EmptyState icon={Info} text="Flag a few items over the next week or two to see patterns here." />
+        <div className="di-panel-head">
+          <h3>Most frequently depleted items</h3>
+          <select value={depletionRoom} onChange={(e) => setDepletionRoom(e.target.value)}>
+            <option value="All rooms">All rooms</option>
+            {ROOMS.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+        </div>
+        {depletionRanking.length === 0 ? (
+          <EmptyState icon={Info} text="No flags recorded for this room yet." />
         ) : (
-          <>
-            <div className="di-chart-wrap">
-              <ResponsiveContainer width="100%" height={Math.max(180, ranked.length * 34)}>
-                <BarChart
-                  data={ranked.map((r) => ({
-                    name: r.item.name.length > 28 ? r.item.name.slice(0, 26) + "…" : r.item.name,
-                    count: r.count30,
-                  }))}
-                  layout="vertical"
-                  margin={{ left: 8, right: 24, top: 4, bottom: 4 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--line)" horizontal={false} />
-                  <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11, fill: "var(--ink-soft)" }} />
-                  <YAxis type="category" dataKey="name" width={170} tick={{ fontSize: 11, fill: "var(--ink)" }} />
-                  <Tooltip
-                    formatter={(v) => [`${v} times`, "Flagged in last 30 days"]}
-                    contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid var(--line)" }}
-                  />
-                  <Bar dataKey="count" radius={[0, 4, 4, 0]}>
-                    {ranked.map((r, idx) => (
-                      <Cell key={idx} fill={r.count30 >= 4 ? "var(--red)" : r.count30 >= 2 ? "var(--amber)" : "var(--clay)"} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-            <ul className="di-activity-list" style={{ marginTop: 14 }}>
-              {ranked.map((r) => (
-                <li key={r.item.id} className="di-activity-row">
-                  <div className="di-activity-main">
-                    <div className="di-cell-name">{r.item.name}</div>
-                    <div className="di-cell-sub">
-                      {r.avgGap !== null
-                        ? `Flagged roughly every ${r.avgGap.toFixed(1)} days`
-                        : "Not enough history to estimate a pattern yet"}
-                    </div>
+          <div className="di-chart-wrap">
+            <ResponsiveContainer width="100%" height={Math.max(180, depletionRanking.length * 34)}>
+              <BarChart
+                data={depletionRanking.map((r) => ({
+                  name: r.item.name.length > 28 ? r.item.name.slice(0, 26) + "…" : r.item.name,
+                  count: r.count,
+                }))}
+                layout="vertical"
+                margin={{ left: 8, right: 24, top: 4, bottom: 4 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--line)" horizontal={false} />
+                <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11, fill: "var(--ink-soft)" }} />
+                <YAxis type="category" dataKey="name" width={170} tick={{ fontSize: 11, fill: "var(--ink)" }} />
+                <Tooltip
+                  formatter={(v) => [`${v} times`, `Flagged in ${depletionRoom}`]}
+                  contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid var(--line)" }}
+                />
+                <Bar dataKey="count" radius={[0, 4, 4, 0]} fill="var(--clay)" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+
+      <div className="di-panel">
+        <div className="di-panel-head">
+          <h3>Rooms with highest replenishment demand</h3>
+        </div>
+        {roomDemand.length === 0 ? (
+          <EmptyState icon={Info} text="No flags recorded yet." />
+        ) : (
+          <div className="di-chart-wrap">
+            <ResponsiveContainer width="100%" height={Math.max(180, roomDemand.length * 28)}>
+              <BarChart data={roomDemand} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--line)" horizontal={false} />
+                <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11, fill: "var(--ink-soft)" }} />
+                <YAxis type="category" dataKey="room" width={110} tick={{ fontSize: 11, fill: "var(--ink)" }} />
+                <Tooltip
+                  formatter={(v) => [`${v} flags`, "Total raised"]}
+                  contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid var(--line)" }}
+                />
+                <Bar dataKey="count" radius={[0, 4, 4, 0]} fill="var(--red)" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+
+      <div className="di-panel">
+        <div className="di-panel-head">
+          <h3>Potential overconsumption</h3>
+        </div>
+        <div className="di-hint-text">
+          Rooms needing an item noticeably more often than the clinic average for that same item --
+          worth a look, not a verdict. Could be genuinely higher demand, could be waste.
+        </div>
+        {overconsumption.length === 0 ? (
+          <EmptyState icon={Info} text="Not enough flag history across multiple rooms yet to compare fairly." />
+        ) : (
+          <ul className="di-activity-list">
+            {overconsumption.map((o, idx) => (
+              <li key={idx} className="di-activity-row">
+                <div className="di-activity-main">
+                  <div className="di-cell-name">
+                    {o.item.name} · {o.room}
                   </div>
-                </li>
-              ))}
-            </ul>
-          </>
+                  <div className="di-cell-sub">
+                    Needed every {o.gap.toFixed(1)} days here, vs {o.clinicAvgGap.toFixed(1)} days clinic-wide
+                  </div>
+                </div>
+                <span className="di-badge" style={{ color: "var(--red)", background: "var(--red-bg)" }}>
+                  {o.ratio.toFixed(1)}x
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="di-panel">
+        <div className="di-panel-head">
+          <h3>Operational performance by room</h3>
+        </div>
+        {resolutionStats.roomMedians.length === 0 ? (
+          <EmptyState icon={Info} text="Resolve a few flags to see how quickly each room gets restocked." />
+        ) : (
+          <ul className="di-activity-list">
+            {resolutionStats.roomMedians.map((r) => (
+              <li key={r.room} className="di-activity-row">
+                <div className="di-activity-main">
+                  <div className="di-cell-name">{r.room}</div>
+                  <div className="di-cell-sub">{r.count} flags resolved</div>
+                </div>
+                <div className="di-alert-stock">{formatDuration(r.medianMs)}</div>
+              </li>
+            ))}
+          </ul>
         )}
       </div>
     </div>
@@ -2950,6 +3152,7 @@ const CSS = `
   display: flex; align-items: center; gap: 9px; color: var(--ink-soft);
   font-size: 13px; padding: 18px 4px;
 }
+.di-hint-text { color: var(--ink-soft); font-size: 12.5px; padding: 0 2px 12px; line-height: 1.5; }
 .di-alert-list { list-style: none; margin: 0; padding: 0; }
 .di-room-group { border-bottom: 1px solid var(--line); }
 .di-room-group:last-child { border-bottom: none; }
