@@ -30,6 +30,9 @@ import {
 import {
   BarChart,
   Bar,
+  LineChart,
+  Line,
+  Legend,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -501,6 +504,38 @@ function roomDemandRanking(history) {
 // honestly: for a given item, does one room need it noticeably more often
 // than the clinic average for that same item. A genuine, defensible
 // signal worth investigating -- not a verdict on why.
+// Weekly totals of flags raised vs resolved -- answers "is this getting
+// better or worse over time," which nothing else on Trends does. Everything
+// else here is a snapshot of right now; this is the only one that shows
+// direction. A rising "Resolved" line tracking close behind "Flagged" means
+// the team is keeping pace; a widening gap means things are falling behind.
+function weeklyFlagTrend(history) {
+  const events = history.filter((h) => h.action === "flagged" || h.action === "resolved");
+  if (events.length === 0) return [];
+
+  const WEEK_MS = 7 * 86400000;
+  const minDate = Math.min(...events.map((e) => new Date(e.date).getTime()));
+  const buckets = {};
+
+  events.forEach((e) => {
+    const t = new Date(e.date).getTime();
+    const weekIndex = Math.floor((t - minDate) / WEEK_MS);
+    const bucketStart = new Date(minDate + weekIndex * WEEK_MS);
+    const key = bucketStart.toISOString().slice(0, 10);
+    if (!buckets[key]) buckets[key] = { flagged: 0, resolved: 0, weekStart: bucketStart };
+    if (e.action === "flagged") buckets[key].flagged += 1;
+    else buckets[key].resolved += 1;
+  });
+
+  return Object.values(buckets)
+    .sort((a, b) => a.weekStart - b.weekStart)
+    .map((b) => ({
+      label: b.weekStart.toLocaleDateString("en-AU", { day: "numeric", month: "short" }),
+      flagged: b.flagged,
+      resolved: b.resolved,
+    }));
+}
+
 function overconsumptionOutliers(items, history) {
   const flags = history.filter((h) => h.action === "flagged");
   const byItem = {};
@@ -592,6 +627,124 @@ function computeResolutionStats(history) {
     .sort((a, b) => b.medianMs - a.medianMs);
 
   return { overallMedian, count: durationsMs.length, roomMedians };
+}
+
+// The Dashboard's suggested to-do widget, in the priority order a DA asked
+// for directly: urgent alerts first, then missing items, then low stock,
+// then overdue audits last. Only sections with something to actually do
+// are included, so the widget can just not render at all when there's
+// nothing pending.
+function buildDashboardTodos({ openAlerts, missingAuditItems, activeFlags, itemsById, roomAudits, setView }) {
+  const sections = [];
+
+  if (openAlerts.length > 0) {
+    sections.push({
+      key: "urgent",
+      label: "Urgent alerts",
+      icon: Bell,
+      color: "var(--red)",
+      items: openAlerts.map((a) => `${a.room}: ${a.message}`),
+    });
+  }
+
+  if (missingAuditItems.length > 0) {
+    sections.push({
+      key: "missing",
+      label: "Missing items to restore",
+      icon: X,
+      color: "var(--red)",
+      items: missingAuditItems.map((m) => `${m.name} — ${m.room}`),
+    });
+  }
+
+  if (activeFlags.length > 0) {
+    const lowStockItems = activeFlags
+      .map((f) => {
+        const item = itemsById[f.itemId];
+        return item ? `${item.name} — ${f.room}` : null;
+      })
+      .filter(Boolean);
+    if (lowStockItems.length > 0) {
+      sections.push({
+        key: "lowstock",
+        label: "Low stock to resolve",
+        icon: Flag,
+        color: "var(--amber)",
+        items: lowStockItems,
+      });
+    }
+  }
+
+  const cutoff = Date.now() - 3 * 86400000;
+  const overdueAudits = roomAudits.filter(({ audit }) => !audit || new Date(audit.date).getTime() < cutoff);
+  if (overdueAudits.length > 0) {
+    sections.push({
+      key: "audits",
+      label: "Audits overdue (3+ days)",
+      icon: ClipboardList,
+      color: "var(--clay)",
+      onClickSection: () => setView("rooms"),
+      items: overdueAudits.map(({ room, audit }) =>
+        audit ? `${room} — last audited ${timeAgo(audit.date)}` : `${room} — never audited`
+      ),
+    });
+  }
+
+  return sections;
+}
+
+// A small, dismissible floating widget -- collapsed by default to a badge
+// showing the total count, expanding to the prioritised list on tap.
+function DashboardTodoWidget({ sections }) {
+  const [open, setOpen] = useState(false);
+  const total = sections.reduce((sum, s) => sum + s.items.length, 0);
+  if (total === 0) return null;
+
+  const ITEM_CAP = 4;
+
+  return (
+    <div className="di-todo-widget">
+      {open && (
+        <div className="di-todo-panel">
+          <div className="di-todo-panel-head">
+            <span>Suggested next steps</span>
+            <button className="di-todo-close" onClick={() => setOpen(false)}>
+              <X size={15} />
+            </button>
+          </div>
+          <div className="di-todo-panel-body">
+            {sections.map((s) => {
+              const Icon = s.icon;
+              return (
+                <div key={s.key} className="di-todo-section">
+                  <div
+                    className={`di-todo-section-head ${s.onClickSection ? "is-clickable" : ""}`}
+                    onClick={s.onClickSection}
+                  >
+                    <Icon size={13} style={{ color: s.color }} />
+                    <span>{s.label}</span>
+                    <span className="di-todo-count">{s.items.length}</span>
+                  </div>
+                  <ul className="di-todo-items">
+                    {s.items.slice(0, ITEM_CAP).map((text, idx) => (
+                      <li key={idx}>{text}</li>
+                    ))}
+                  </ul>
+                  {s.items.length > ITEM_CAP && (
+                    <div className="di-todo-more">+{s.items.length - ITEM_CAP} more</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      <button className="di-todo-bubble" onClick={() => setOpen(!open)}>
+        <ClipboardList size={18} />
+        <span className="di-todo-badge">{total}</span>
+      </button>
+    </div>
+  );
 }
 
 /* ============================================================================
@@ -1364,6 +1517,7 @@ export default function DentalInventoryApp() {
           roomAudits={roomAudits}
           openOrders={openOrders}
           missingAuditItems={missingAuditItems}
+          openAlerts={openAlerts}
           roomsAffected={roomsAffected}
           myRoom={myRoom}
           myName={myName}
@@ -1543,9 +1697,11 @@ function RoomGroup({ room, count, children }) {
   );
 }
 
-function Dashboard({ items, itemsById, activeFlags, backorderedItems, roomAudits, openOrders, missingAuditItems, roomsAffected, myRoom, myName, setView, onToggle, onSetItemStatus, onSetCustomStatus, onRebuildFlags }) {
+function Dashboard({ items, itemsById, activeFlags, backorderedItems, roomAudits, openOrders, missingAuditItems, openAlerts, roomsAffected, myRoom, myName, setView, onToggle, onSetItemStatus, onSetCustomStatus, onRebuildFlags }) {
   const [confirmingRebuild, setConfirmingRebuild] = useState(false);
   const [rebuildResult, setRebuildResult] = useState(null); // null | { count: number }
+
+  const todoSections = buildDashboardTodos({ openAlerts, missingAuditItems, activeFlags, itemsById, roomAudits, setView });
 
   const sorted = [...activeFlags].sort((a, b) => new Date(a.flaggedAt) - new Date(b.flaggedAt));
 
@@ -1777,6 +1933,8 @@ function Dashboard({ items, itemsById, activeFlags, backorderedItems, roomAudits
           </button>
         )}
       </div>
+
+      <DashboardTodoWidget sections={todoSections} />
     </div>
   );
 }
@@ -2285,6 +2443,7 @@ function Trends({ items, history, setView }) {
   const roomDemand = roomDemandRanking(history);
   const overconsumption = overconsumptionOutliers(items, history);
   const resolutionStats = computeResolutionStats(history);
+  const weeklyTrend = weeklyFlagTrend(history);
 
   return (
     <div className="di-page">
@@ -2301,6 +2460,41 @@ function Trends({ items, history, setView }) {
         />
         <StatCard label="Flags resolved (all time)" value={resolutionStats.count} />
         <StatCard label="Rooms with flag history" value={roomDemand.length} />
+      </div>
+
+      <div className="di-panel">
+        <div className="di-panel-head">
+          <h3>Flag volume over time</h3>
+        </div>
+        <div className="di-hint-text">
+          Weekly totals. A "Resolved" line tracking close behind "Flagged" means the team's keeping pace --
+          a widening gap means things are falling behind. Everything else on this page is a snapshot of
+          right now; this is the one that shows whether things are actually improving.
+        </div>
+        {weeklyTrend.length < 2 ? (
+          <EmptyState icon={Info} text="Needs a couple of weeks of history before a trend line means much." />
+        ) : (
+          <div className="di-chart-wrap">
+            <ResponsiveContainer width="100%" height={220}>
+              <LineChart data={weeklyTrend} margin={{ left: 8, right: 16, top: 8, bottom: 4 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--line)" />
+                <XAxis dataKey="label" tick={{ fontSize: 11, fill: "var(--ink-soft)" }} />
+                <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: "var(--ink-soft)" }} />
+                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid var(--line)" }} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Line type="monotone" dataKey="flagged" name="Flagged" stroke="var(--red)" strokeWidth={2} dot={{ r: 3 }} />
+                <Line
+                  type="monotone"
+                  dataKey="resolved"
+                  name="Resolved"
+                  stroke="var(--green)"
+                  strokeWidth={2}
+                  dot={{ r: 3 }}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
       </div>
 
       <div className="di-panel">
@@ -3112,6 +3306,39 @@ const CSS = `
   margin-top: 14px;
 }
 .di-urgent-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.di-todo-widget { position: fixed; bottom: 22px; right: 22px; z-index: 500; display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
+.di-todo-bubble {
+  position: relative; width: 52px; height: 52px; border-radius: 50%;
+  background: var(--charcoal); color: #ECE7DA; border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+}
+.di-todo-badge {
+  position: absolute; top: -4px; right: -4px; background: var(--red); color: #fff;
+  font-size: 11px; font-weight: 700; min-width: 20px; height: 20px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center; padding: 0 5px;
+  font-family: 'Inter', sans-serif;
+}
+.di-todo-panel {
+  width: 300px; max-height: 60vh; overflow-y: auto; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 8px 28px rgba(0,0,0,0.18);
+}
+.di-todo-panel-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px; font-weight: 700; font-size: 13px; color: var(--ink);
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel);
+}
+.di-todo-close { background: none; border: none; cursor: pointer; color: var(--ink-soft); padding: 2px; }
+.di-todo-panel-body { padding: 6px 14px 12px; }
+.di-todo-section { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.di-todo-section:last-child { border-bottom: none; }
+.di-todo-section-head { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.di-todo-section-head.is-clickable { cursor: pointer; }
+.di-todo-section-head.is-clickable:hover { text-decoration: underline; }
+.di-todo-count { margin-left: auto; color: var(--ink-soft); font-family: 'Inter', sans-serif; font-weight: 600; }
+.di-todo-items { list-style: none; margin: 6px 0 0; padding: 0; }
+.di-todo-items li { font-size: 12px; color: var(--ink-soft); padding: 3px 0 3px 19px; line-height: 1.4; }
+.di-todo-more { font-size: 11.5px; color: var(--ink-soft); padding: 2px 0 0 19px; font-style: italic; }
 .di-save-error {
   display: flex; align-items: center; gap: 7px; background: var(--red-bg);
   color: var(--red); padding: 8px 12px; border-radius: 7px; font-size: 12.5px;
