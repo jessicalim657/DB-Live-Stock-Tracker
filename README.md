@@ -1,4 +1,4 @@
-# Dental Boutique Stock -- deployment guide
+# Dental Inventory Stock Flagger System -- deployment guide
 
 No terminal, no Node.js install, no local dev tools needed. Everything below
 happens through GitHub's and Vercel's websites, plus Firebase's console.
