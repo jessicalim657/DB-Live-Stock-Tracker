@@ -132,3 +132,10 @@ The experience strengthened my interest in software engineering, product develop
 ---
 
 *This repository showcases an independently initiated software project developed for learning and workflow improvement. It is not an official Dental Boutique software product or a substitute for the clinic's approved inventory management procedures.*
+
+---
+
+## ⚙️ Installation & Deployment
+
+For instructions on setting up Firebase and deploying
+the application, see [DEPLOYMENT.md](DEPLOYMENT.md).
