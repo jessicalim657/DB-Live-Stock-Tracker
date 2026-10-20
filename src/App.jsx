@@ -487,6 +487,22 @@ function itemDepletionRanking(items, history, room) {
     .slice(0, 10);
 }
 
+// How often each audit instrument/room item has been marked missing.
+// Counts one per "marked missing" action (instrument_missing events).
+function instrumentMissingRanking(history, room) {
+  const counts = {};
+  history
+    .filter((h) => h.action === "instrument_missing" && (room === "All rooms" || h.room === room))
+    .forEach((h) => {
+      const key = h.instrumentName || h.instrumentId;
+      counts[key] = (counts[key] || 0) + 1;
+    });
+  return Object.entries(counts)
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+}
+
 // Which rooms raise the most flags overall, regardless of item.
 function roomDemandRanking(history) {
   const flags = history.filter((h) => h.action === "flagged");
@@ -1159,6 +1175,21 @@ export default function DentalInventoryApp() {
   // different item, because they're never the same document.
   const setRoomAuditItemStatus = useCallback((room, itemId, status, staff) => {
     const now = new Date().toISOString();
+    // Count every time someone marks an instrument missing (frequency
+    // tracker on Trends). No staff name is stored on this event on purpose.
+    if (status === "attention") {
+      const ci = ((auditChecklist && auditChecklist["Room Items"]) || []).find((i) => i.id === itemId);
+      const evt = {
+        id: `h_${Date.now()}_${Math.round(Math.random() * 9999)}`,
+        itemId: null,
+        instrumentId: itemId,
+        instrumentName: ci ? ci.name : itemId,
+        room,
+        action: "instrument_missing",
+        date: now,
+      };
+      setDoc(doc(collection(db, "flagHistoryEvents"), evt.id), evt).catch(() => {});
+    }
     setDoc(doc(db, "roomAuditStatus", `${room}::${itemId}`), {
       room,
       itemId,
@@ -1166,7 +1197,7 @@ export default function DentalInventoryApp() {
       updatedAt: now,
       updatedBy: staff || "",
     }).catch(() => setSaveError("Couldn't save -- check your connection."));
-  }, []);
+  }, [auditChecklist]);
 
   // Removing a checklist item also wipes any per-room status recorded
   // against it, everywhere -- so it can never linger as an orphaned
@@ -1206,8 +1237,20 @@ export default function DentalInventoryApp() {
     );
   }, []);
 
-  const setCustomAuditItemStatus = useCallback((room, itemId, status, staff) => {
+  const setCustomAuditItemStatus = useCallback((room, itemId, status, staff, itemText) => {
     const now = new Date().toISOString();
+    if (status === "attention") {
+      const evt = {
+        id: `h_${Date.now()}_${Math.round(Math.random() * 9999)}`,
+        itemId: null,
+        instrumentId: itemId,
+        instrumentName: itemText || "Personalised item",
+        room,
+        action: "instrument_missing",
+        date: now,
+      };
+      setDoc(doc(collection(db, "flagHistoryEvents"), evt.id), evt).catch(() => {});
+    }
     updateDoc(doc(db, "roomCustomAuditItems", itemId), {
       status,
       updatedAt: now,
@@ -1512,6 +1555,11 @@ export default function DentalInventoryApp() {
         <Dashboard
           items={items}
           itemsById={itemsById}
+          history={history}
+          onOpenAudit={(room) => {
+            setAuditRoom(room);
+            setView("audit-room");
+          }}
           activeFlags={activeFlags}
           backorderedItems={backorderedItems}
           roomAudits={roomAudits}
@@ -1529,7 +1577,7 @@ export default function DentalInventoryApp() {
         />
       )}
       {view === "report" && (
-        <ReportLowStock
+        <ReportOrAlert
           items={items}
           activeFlags={activeFlags}
           myRoom={myRoom}
@@ -1537,6 +1585,7 @@ export default function DentalInventoryApp() {
           myName={myName}
           setMyName={setMyName}
           onToggle={toggleFlag}
+          onSendAlert={sendUrgentAlert}
         />
       )}
       {view === "rooms" && (
@@ -1590,9 +1639,6 @@ export default function DentalInventoryApp() {
           onFulfill={fulfillOrderRequest}
         />
       )}
-      {view === "urgent" && (
-        <SendUrgentAlert myRoom={myRoom} myName={myName} setMyName={setMyName} onSend={sendUrgentAlert} />
-      )}
       {view === "feedback" && (
         <Feedback feedback={feedback} onSubmit={submitFeedback} onReview={markFeedbackReviewed} myName={myName} setMyName={setMyName} />
       )}
@@ -1604,16 +1650,21 @@ export default function DentalInventoryApp() {
    SHELL / NAV
 ============================================================================ */
 function Shell({ view, setView, saveError, openAlerts, onResolveAlert, myName, children }) {
-  const nav = [
+  const todayNav = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { id: "report", label: "Report low stock", icon: Flag },
-    { id: "urgent", label: "Urgent Alert", icon: Bell },
+    { id: "report", label: "Report / alert", icon: Flag },
     { id: "rooms", label: "By room", icon: Building2 },
+  ];
+  const moreNav = [
     { id: "trends", label: "Trends", icon: TrendingUp },
     { id: "catalogue", label: "Catalogue", icon: BookOpen },
     { id: "orders", label: "Order Requests", icon: ShoppingCart },
     { id: "feedback", label: "Feedback", icon: MessageSquare },
   ];
+  // Auto-expand "More" if the current page lives there, so navigating within
+  // that group doesn't require re-opening it every time.
+  const [moreOpen, setMoreOpen] = useState(() => moreNav.some((n) => n.id === view));
+
   return (
     <div className="di-root">
       <style>{CSS}</style>
@@ -1645,7 +1696,8 @@ function Shell({ view, setView, saveError, openAlerts, onResolveAlert, myName, c
           </div>
         </div>
         <nav className="di-nav">
-          {nav.map((n) => {
+          <div className="di-nav-label">Today</div>
+          {todayNav.map((n) => {
             const Icon = n.icon;
             const active = view === n.id;
             return (
@@ -1659,6 +1711,26 @@ function Shell({ view, setView, saveError, openAlerts, onResolveAlert, myName, c
               </button>
             );
           })}
+
+          <button className="di-nav-more-toggle" onClick={() => setMoreOpen(!moreOpen)}>
+            {moreOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+            <span>More</span>
+          </button>
+          {moreOpen &&
+            moreNav.map((n) => {
+              const Icon = n.icon;
+              const active = view === n.id;
+              return (
+                <button
+                  key={n.id}
+                  className={`di-nav-btn di-nav-btn-sub ${active ? "is-active" : ""}`}
+                  onClick={() => setView(n.id)}
+                >
+                  <Icon size={15} strokeWidth={2} />
+                  <span>{n.label}</span>
+                </button>
+              );
+            })}
         </nav>
         <div className="di-rail-footer">One tap when something's low. That's the whole job.</div>
       </aside>
@@ -1697,9 +1769,367 @@ function RoomGroup({ room, count, children }) {
   );
 }
 
-function Dashboard({ items, itemsById, activeFlags, backorderedItems, roomAudits, openOrders, missingAuditItems, openAlerts, roomsAffected, myRoom, myName, setView, onToggle, onSetItemStatus, onSetCustomStatus, onRebuildFlags }) {
+
+/* ============================================================================
+   CLINIC FLOOR MAP + ROOM SHEET + LOST & FOUND
+============================================================================ */
+const TREATMENT_ROOMS = ROOMS.filter((r) => r !== "Sterilisation" && r !== "Lab");
+
+// One tile per room, coloured by what's going on in it right now. Tapping a
+// tile opens that room's full picture (RoomSheet below).
+function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, onOpenRoom }) {
+  const auditByRoom = {};
+  roomAudits.forEach(({ room, audit }) => (auditByRoom[room] = audit));
+
+  const stateFor = (room) => {
+    if (alertRooms.has(room)) return "urgent";
+    if ((flagsByRoom[room] || 0) > 0) return "flag";
+    if ((missingByRoom[room] || 0) > 0) return "missing";
+    return "ok";
+  };
+
+  // variant: "room" (compact U tile), "steri" (big centre tile), "lab" (wide strip)
+  const renderTile = (room, variant, area) => {
+    const st = stateFor(room);
+    const flags = flagsByRoom[room] || 0;
+    const missing = missingByRoom[room] || 0;
+    const label = room.startsWith("Room ") ? room.slice(5) : room;
+    return (
+      <button
+        key={room}
+        className={`di-tile is-${st} is-${variant}${myRoom === room ? " is-mine" : ""}`}
+        style={area}
+        onClick={() => onOpenRoom(room)}
+        aria-label={`${room}: ${st === "ok" ? "all good" : st}`}
+      >
+        <span className="di-tile-label">{label}</span>
+        <span className="di-tile-badges">
+          {st === "urgent" && (
+            <span className="di-tile-badge di-tile-badge-urgent">
+              <AlertTriangle size={11} />
+            </span>
+          )}
+          {flags > 0 && <span className="di-tile-badge di-tile-badge-flag">{flags}</span>}
+          {missing > 0 && <span className="di-tile-badge di-tile-badge-missing">{missing}</span>}
+          {st === "ok" && variant !== "room" && <CircleCheck size={16} className="di-tile-ok" />}
+        </span>
+        {myRoom === room && <span className="di-tile-here">you're here</span>}
+      </button>
+    );
+  };
+
+  // The U, to match the real floor: Room 1 starts at the top of the left
+  // arm and runs down (Rooms 1-5), along the bottom (Rooms 6-10), then up
+  // the right arm (Rooms 11-18, with 11 at the bottom corner). The arms hold
+  // different numbers of rooms, so both are drawn on a 35-unit-tall grid:
+  // each left room spans 7 units, each right room spans 5, which keeps the
+  // two arms exactly the same length.
+  const uPlacements = {};
+  for (let i = 1; i <= 5; i++) uPlacements[i] = { gridColumn: 1, gridRow: `${(i - 1) * 7 + 1} / span 7` };
+  for (let i = 6; i <= 10; i++) uPlacements[i] = { gridColumn: i - 5, gridRow: 36 };
+  uPlacements[11] = { gridColumn: 6, gridRow: 36 };
+  for (let i = 12; i <= 18; i++) uPlacements[i] = { gridColumn: 6, gridRow: `${(18 - i) * 5 + 1} / span 5` };
+
+  return (
+    <div className="di-panel">
+      <div className="di-panel-head">
+        <h3>Clinic floor</h3>
+        <span className="di-hint-inline">Tap a room</span>
+      </div>
+      <div className="di-u">
+        {renderTile("Sterilisation", "steri", { gridColumn: "2 / 6", gridRow: "14 / 36" })}
+        {TREATMENT_ROOMS.map((r) => renderTile(r, "room", uPlacements[parseInt(r.slice(5), 10)]))}
+        {renderTile("Lab", "lab", { gridColumn: "2 / 6", gridRow: 38 })}
+      </div>
+      <div className="di-legend">
+        <span><i className="di-legend-dot" style={{ background: "var(--green)" }} /> All good</span>
+        <span><i className="di-legend-dot" style={{ background: "var(--red)" }} /> Low stock</span>
+        <span><i className="di-legend-dot" style={{ background: "var(--clay)" }} /> Item missing</span>
+        <span><i className="di-legend-dot" style={{ background: "#B3261E" }} /> Urgent alert</span>
+      </div>
+    </div>
+  );
+}
+
+// Everything about one room, in a sheet that slides up over the dashboard.
+function RoomSheet({
+  room,
+  items,
+  itemsById,
+  history,
+  activeFlags,
+  missingAuditItems,
+  openAlerts,
+  roomAudits,
+  myName,
+  onToggle,
+  onResolveMissing,
+  onOpenAudit,
+  onClose,
+}) {
+  useEffect(() => {
+    const onKey = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const flags = activeFlags
+    .filter((f) => f.room === room && itemsById[f.itemId])
+    .sort((a, b) => new Date(a.flaggedAt) - new Date(b.flaggedAt));
+  const missing = missingAuditItems.filter((m) => m.room === room);
+  const alerts = openAlerts.filter((a) => a.room === room);
+  const audit = (roomAudits.find((r) => r.room === room) || {}).audit || null;
+  const isTreatment = TREATMENT_ROOMS.includes(room);
+
+  const cutoff = Date.now() - 30 * 86400000;
+  const flags30 = history.filter(
+    (h) => h.action === "flagged" && h.room === room && new Date(h.date).getTime() >= cutoff
+  ).length;
+  const medianRow = computeResolutionStats(history).roomMedians.find((r) => r.room === room);
+  const topItems = itemDepletionRanking(items, history, room).slice(0, 3);
+  const topMissing = instrumentMissingRanking(history, room).slice(0, 3);
+
+  const activity = history
+    .filter(
+      (h) =>
+        h.room === room &&
+        (h.action === "flagged" || h.action === "resolved" || h.action === "audited" || h.action === "instrument_missing")
+    )
+    .sort((a, b) => new Date(b.date) - new Date(a.date))
+    .slice(0, 8)
+    .map((h) => {
+      const name = h.itemId && itemsById[h.itemId] ? itemsById[h.itemId].name : "An item";
+      let text = "";
+      if (h.action === "flagged") text = `${name} flagged low`;
+      else if (h.action === "resolved") text = `${name} restocked`;
+      else if (h.action === "audited") text = `Audit completed · ${h.reviewedCount ?? 0} reviewed`;
+      else text = `${h.instrumentName || "An item"} marked missing`;
+      return { id: h.id, text, date: h.date };
+    });
+
+  const allGood = flags.length === 0 && missing.length === 0 && alerts.length === 0;
+
+  return (
+    <div className="di-sheet-backdrop" onClick={onClose}>
+      <div className="di-sheet" role="dialog" aria-label={room} onClick={(e) => e.stopPropagation()}>
+        <div className="di-sheet-head">
+          <div>
+            <div className="di-sheet-eyebrow">{isTreatment ? "Treatment room" : "Shared space"}</div>
+            <h2 className="di-sheet-title">{room}</h2>
+            <div className="di-sheet-status">
+              {allGood ? (
+                <span style={{ color: "var(--green)" }}>
+                  <CircleCheck size={14} /> All good right now
+                </span>
+              ) : (
+                <span style={{ color: "var(--red)" }}>
+                  {flags.length + missing.length + alerts.length} thing
+                  {flags.length + missing.length + alerts.length === 1 ? "" : "s"} need attention
+                </span>
+              )}
+            </div>
+          </div>
+          <button className="di-sheet-close" onClick={onClose} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="di-sheet-stats">
+          <div className="di-sheet-stat">
+            <div className="di-sheet-stat-num">{flags.length}</div>
+            <div className="di-sheet-stat-label">Low now</div>
+          </div>
+          <div className="di-sheet-stat">
+            <div className="di-sheet-stat-num">{missing.length}</div>
+            <div className="di-sheet-stat-label">Missing</div>
+          </div>
+          <div className="di-sheet-stat">
+            <div className="di-sheet-stat-num">{flags30}</div>
+            <div className="di-sheet-stat-label">Flags, 30 days</div>
+          </div>
+          <div className="di-sheet-stat">
+            <div className="di-sheet-stat-num">{medianRow ? formatDuration(medianRow.medianMs) : "—"}</div>
+            <div className="di-sheet-stat-label">Typical restock</div>
+          </div>
+        </div>
+
+        {alerts.map((a) => (
+          <div key={a.id} className="di-sheet-alert">
+            <AlertTriangle size={15} />
+            <div>
+              <strong>Urgent alert</strong> · {a.message}
+              <div className="di-cell-sub">{timeAgo(a.createdAt || a.date)}</div>
+            </div>
+          </div>
+        ))}
+
+        <div className="di-sheet-section">
+          <div className="di-sheet-section-title">Low stock</div>
+          {flags.length === 0 ? (
+            <div className="di-sheet-empty">Nothing flagged low.</div>
+          ) : (
+            <ul className="di-activity-list">
+              {flags.map((f) => (
+                <li key={flagKeyReact(f)} className="di-alert-row">
+                  <span className="di-status-dot" style={{ background: "var(--red)" }} />
+                  <div className="di-alert-main">
+                    <div className="di-alert-name">{itemsById[f.itemId].name}</div>
+                    <div className="di-alert-meta">
+                      {itemsById[f.itemId].category} · {timeAgo(f.flaggedAt)}
+                    </div>
+                  </div>
+                  <button
+                    className="di-small-btn di-small-btn-ghost"
+                    onClick={() => onToggle({ itemId: f.itemId, room, staff: myName || "" })}
+                  >
+                    <Undo2 size={13} /> Restock
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="di-sheet-section">
+          <div className="di-sheet-section-title">Missing from this room</div>
+          {missing.length === 0 ? (
+            <div className="di-sheet-empty">Nothing missing.</div>
+          ) : (
+            <ul className="di-activity-list">
+              {missing.map((m, idx) => (
+                <li key={`${m.itemId}-${idx}`} className="di-alert-row">
+                  <span className="di-status-dot" style={{ background: "var(--clay)" }} />
+                  <div className="di-alert-main">
+                    <div className="di-alert-name">{m.name}</div>
+                    <div className="di-alert-meta">{m.updatedAt ? timeAgo(m.updatedAt) : ""}</div>
+                  </div>
+                  <button className="di-small-btn di-small-btn-ghost" onClick={() => onResolveMissing(m)}>
+                    <CircleCheck size={13} /> Found it
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {isTreatment && (
+          <div className="di-sheet-section">
+            <div className="di-sheet-section-title">Last audit</div>
+            <div className="di-sheet-line">
+              {audit
+                ? `${timeAgo(audit.date)} · ${audit.reviewedCount} reviewed${
+                    audit.flaggedCount > 0 ? ` · ${audit.flaggedCount} flagged` : ""
+                  }${audit.staff ? ` · by ${audit.staff}` : ""}`
+                : "This room hasn't been audited yet."}
+            </div>
+          </div>
+        )}
+
+        {(topItems.length > 0 || topMissing.length > 0) && (
+          <div className="di-sheet-section">
+            <div className="di-sheet-section-title">Patterns in this room</div>
+            {topItems.length > 0 && (
+              <div className="di-sheet-line">
+                <strong>Runs low most:</strong> {topItems.map((t) => `${t.item.name} (${t.count}×)`).join(", ")}
+              </div>
+            )}
+            {topMissing.length > 0 && (
+              <div className="di-sheet-line">
+                <strong>Goes missing most:</strong> {topMissing.map((t) => `${t.name} (${t.count}×)`).join(", ")}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="di-sheet-section">
+          <div className="di-sheet-section-title">Recent activity</div>
+          {activity.length === 0 ? (
+            <div className="di-sheet-empty">No activity logged for this room yet.</div>
+          ) : (
+            <ul className="di-sheet-activity">
+              {activity.map((a) => (
+                <li key={a.id}>
+                  <span>{a.text}</span>
+                  <span className="di-cell-sub">{timeAgo(a.date)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+
+        {isTreatment && (
+          <div className="di-sheet-cta-wrap">
+            <button className="di-small-btn di-sheet-cta" onClick={() => onOpenAudit(room)}>
+              <ClipboardList size={14} /> Audit this room
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Missing room items as sticky notes. Tapping "Found it" plays a short
+// pop-away animation, then marks the item as back in the room.
+function LostAndFound({ missingAuditItems, onResolveMissing }) {
+  const [leaving, setLeaving] = useState({});
+  const noteKey = (m) => `${m.room}::${m.itemId}`;
+  const tints = ["#F6EBB8", "#F0DDD3", "#E4E5D9", "#E8E0F0"];
+
+  const found = (m) => {
+    setLeaving((l) => ({ ...l, [noteKey(m)]: true }));
+    setTimeout(() => {
+      onResolveMissing(m);
+      setLeaving((l) => {
+        const next = { ...l };
+        delete next[noteKey(m)];
+        return next;
+      });
+    }, 450);
+  };
+
+  return (
+    <div className="di-panel">
+      <div className="di-panel-head">
+        <h3>Lost &amp; found</h3>
+        <span className="di-panel-count">{missingAuditItems.length}</span>
+      </div>
+      {missingAuditItems.length === 0 ? (
+        <EmptyState icon={CircleCheck} text="Nothing's gone missing. Everything's where it should be ✨" />
+      ) : (
+        <div className="di-notes">
+          {missingAuditItems.map((m, idx) => (
+            <div
+              key={noteKey(m)}
+              className={`di-note${leaving[noteKey(m)] ? " is-leaving" : ""}`}
+              style={{
+                background: tints[idx % tints.length],
+                transform: `rotate(${[-1.6, 1.2, -0.8, 1.8][idx % 4]}deg)`,
+              }}
+            >
+              <div className="di-note-name">{m.name}</div>
+              <div className="di-note-room">{m.room}</div>
+              <div className="di-note-foot">
+                <span>{m.updatedAt ? `missing ${timeAgo(m.updatedAt)}` : ""}</span>
+                <button className="di-note-btn" onClick={() => found(m)}>
+                  Found it!
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, roomAudits, openOrders, missingAuditItems, openAlerts, roomsAffected, myRoom, myName, setView, onToggle, onSetItemStatus, onSetCustomStatus, onRebuildFlags, onOpenAudit }) {
+  const [openRoom, setOpenRoom] = useState(null);
+  const [listOpen, setListOpen] = useState(false);
   const [confirmingRebuild, setConfirmingRebuild] = useState(false);
   const [rebuildResult, setRebuildResult] = useState(null); // null | { count: number }
+  const [auditsOpen, setAuditsOpen] = useState(false);
 
   const todoSections = buildDashboardTodos({ openAlerts, missingAuditItems, activeFlags, itemsById, roomAudits, setView });
 
@@ -1710,17 +2140,22 @@ function Dashboard({ items, itemsById, activeFlags, backorderedItems, roomAudits
     return idx === -1 ? ROOMS.length : idx;
   };
 
-  const flagsByRoom = {};
+  // Flags and missing items are still two separate underlying systems (one
+  // is real stock, the other is a room's own presence check) -- but from a
+  // "what needs doing in this room" view, showing them as two separate
+  // panels was just visual duplication. One combined, room-grouped list.
+  const combinedByRoom = {};
   sorted.forEach((f) => {
-    (flagsByRoom[f.room] = flagsByRoom[f.room] || []).push(f);
+    const item = itemsById[f.itemId];
+    if (!item) return;
+    (combinedByRoom[f.room] = combinedByRoom[f.room] || []).push({ kind: "flag", item, data: f });
   });
-  const flagRoomEntries = Object.entries(flagsByRoom).sort((a, b) => roomOrder(a[0]) - roomOrder(b[0]));
+  // Missing items now live on the Lost & found board, so this list is flags only.
+  const combinedRoomEntries = Object.entries(combinedByRoom).sort((a, b) => roomOrder(a[0]) - roomOrder(b[0]));
+  const combinedTotal = sorted.length + missingAuditItems.length;
+  const listTotal = sorted.length;
 
-  const missingByRoom = {};
-  missingAuditItems.forEach((m) => {
-    (missingByRoom[m.room] = missingByRoom[m.room] || []).push(m);
-  });
-  const missingRoomEntries = Object.entries(missingByRoom).sort((a, b) => roomOrder(a[0]) - roomOrder(b[0]));
+  const neverAuditedCount = roomAudits.filter((r) => !r.audit).length;
 
   const resolveMissing = (m) => {
     if (m.type === "checklist") {
@@ -1729,6 +2164,16 @@ function Dashboard({ items, itemsById, activeFlags, backorderedItems, roomAudits
       onSetCustomStatus(m.room, m.itemId, "ok", myName || "");
     }
   };
+
+  const flagsByRoom = {};
+  sorted.forEach((f) => {
+    if (itemsById[f.itemId]) flagsByRoom[f.room] = (flagsByRoom[f.room] || 0) + 1;
+  });
+  const missingByRoom = {};
+  missingAuditItems.forEach((m) => {
+    missingByRoom[m.room] = (missingByRoom[m.room] || 0) + 1;
+  });
+  const alertRooms = new Set(openAlerts.map((a) => a.room));
 
   return (
     <div className="di-page">
@@ -1743,23 +2188,52 @@ function Dashboard({ items, itemsById, activeFlags, backorderedItems, roomAudits
           <Info size={16} />
           <div>
             <strong>This device hasn't been assigned a room yet.</strong> Go to{" "}
-            <button className="di-linklike" onClick={() => setView("report")}>Report low stock</button>{" "}
+            <button className="di-linklike" onClick={() => setView("report")}>Report or alert</button>{" "}
             and set it once -- it'll remember from then on.
           </div>
         </div>
       )}
 
       <div className="di-stats">
-        <StatCard label="Items in catalogue" value={items.length} />
-        <StatCard label="Room flags" value={activeFlags.length} tone={activeFlags.length > 0 ? "critical" : "default"} />
-        <StatCard label="On backorder" value={backorderedItems.length} tone={backorderedItems.length > 0 ? "watch" : "default"} />
-        <StatCard label="Open orders" value={openOrders.length} tone={openOrders.length > 0 ? "watch" : "default"} />
         <StatCard
-          label="Total items Missing"
-          value={missingAuditItems.length}
-          tone={missingAuditItems.length > 0 ? "critical" : "default"}
+          label="Needs attention"
+          value={combinedTotal}
+          tone={combinedTotal > 0 ? "critical" : "default"}
         />
+        <StatCard label="Open orders" value={openOrders.length} tone={openOrders.length > 0 ? "watch" : "default"} />
       </div>
+
+      <FloorMap
+        flagsByRoom={flagsByRoom}
+        missingByRoom={missingByRoom}
+        alertRooms={alertRooms}
+        roomAudits={roomAudits}
+        myRoom={myRoom}
+        onOpenRoom={setOpenRoom}
+      />
+
+      <LostAndFound missingAuditItems={missingAuditItems} onResolveMissing={resolveMissing} />
+
+      {openRoom && (
+        <RoomSheet
+          room={openRoom}
+          items={items}
+          itemsById={itemsById}
+          history={history}
+          activeFlags={activeFlags}
+          missingAuditItems={missingAuditItems}
+          openAlerts={openAlerts}
+          roomAudits={roomAudits}
+          myName={myName}
+          onToggle={onToggle}
+          onResolveMissing={resolveMissing}
+          onOpenAudit={(r) => {
+            setOpenRoom(null);
+            onOpenAudit(r);
+          }}
+          onClose={() => setOpenRoom(null)}
+        />
+      )}
 
       <div className="di-panel">
         <div className="di-panel-head">
@@ -1789,72 +2263,58 @@ function Dashboard({ items, itemsById, activeFlags, backorderedItems, roomAudits
 
       <div className="di-panel">
         <div className="di-panel-head">
-          <h3>Rooms reporting low stock</h3>
-          <span className="di-panel-count">{sorted.length}</span>
+          <h3>Low stock, as a list</h3>
+          <button className="di-audits-collapse-btn" onClick={() => setListOpen(!listOpen)}>
+            <span className="di-panel-count">{listTotal}</span>
+            {listOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+          </button>
         </div>
-        {flagRoomEntries.length === 0 ? (
-          <EmptyState icon={CircleCheck} text="Nothing flagged right now." />
+        {!listOpen ? null : combinedRoomEntries.length === 0 ? (
+          <EmptyState icon={CircleCheck} text="Nothing flagged low right now." />
         ) : (
-          flagRoomEntries.map(([room, flags]) => (
-            <RoomGroup key={room} room={room} count={flags.length}>
-              {flags.map((f) => {
-                const item = itemsById[f.itemId];
-                if (!item) return null;
-                return (
-                  <li key={flagKeyReact(f)} className="di-alert-row">
+          combinedRoomEntries.map(([room, roomItems]) => (
+            <RoomGroup key={room} room={room} count={roomItems.length}>
+              {roomItems.map((entry, idx) =>
+                entry.kind === "flag" ? (
+                  <li key={`flag-${flagKeyReact(entry.data)}`} className="di-alert-row">
                     <span className="di-status-dot" style={{ background: "var(--red)" }} />
                     <div className="di-alert-main">
-                      <div className="di-alert-name">{item.name}</div>
-                      <div className="di-alert-meta">{item.category}</div>
+                      <div className="di-alert-name">{entry.item.name}</div>
+                      <div className="di-alert-meta">Low stock · {entry.item.category}</div>
                     </div>
                     <div className="di-alert-figures">
-                      <div className="di-alert-stock">{timeAgo(f.flaggedAt)}</div>
-                      {f.staff && <div className="di-alert-days">flagged by {f.staff}</div>}
+                      <div className="di-alert-stock">{timeAgo(entry.data.flaggedAt)}</div>
+                      {entry.data.staff && <div className="di-alert-days">flagged by {entry.data.staff}</div>}
                     </div>
                     <button
                       className="di-small-btn di-small-btn-ghost"
                       style={{ marginLeft: 8 }}
-                      onClick={() => onToggle({ itemId: item.id, room, staff: myName || "" })}
+                      onClick={() => onToggle({ itemId: entry.item.id, room, staff: myName || "" })}
                     >
                       <Undo2 size={13} /> Restock
                     </button>
                   </li>
-                );
-              })}
-            </RoomGroup>
-          ))
-        )}
-      </div>
-
-      <div className="di-panel">
-        <div className="di-panel-head">
-          <h3>Missing items from rooms</h3>
-          <span className="di-panel-count">{missingAuditItems.length}</span>
-        </div>
-        {missingRoomEntries.length === 0 ? (
-          <EmptyState icon={CircleCheck} text="Nothing crossed as missing in any room audit." />
-        ) : (
-          missingRoomEntries.map(([room, missingItems]) => (
-            <RoomGroup key={room} room={room} count={missingItems.length}>
-              {missingItems.map((m, idx) => (
-                <li key={idx} className="di-alert-row">
-                  <span className="di-status-dot" style={{ background: "var(--red)" }} />
-                  <div className="di-alert-main">
-                    <div className="di-alert-name">{m.name}</div>
-                  </div>
-                  <div className="di-alert-figures">
-                    <div className="di-alert-stock">{m.updatedAt ? timeAgo(m.updatedAt) : ""}</div>
-                    {m.updatedBy && <div className="di-alert-days">by {m.updatedBy}</div>}
-                  </div>
-                  <button
-                    className="di-small-btn di-small-btn-ghost"
-                    style={{ marginLeft: 8 }}
-                    onClick={() => resolveMissing(m)}
-                  >
-                    <CircleCheck size={13} /> Restored
-                  </button>
-                </li>
-              ))}
+                ) : (
+                  <li key={`missing-${idx}`} className="di-alert-row">
+                    <span className="di-status-dot" style={{ background: "var(--clay)" }} />
+                    <div className="di-alert-main">
+                      <div className="di-alert-name">{entry.data.name}</div>
+                      <div className="di-alert-meta">Missing</div>
+                    </div>
+                    <div className="di-alert-figures">
+                      <div className="di-alert-stock">{entry.data.updatedAt ? timeAgo(entry.data.updatedAt) : ""}</div>
+                      {entry.data.updatedBy && <div className="di-alert-days">by {entry.data.updatedBy}</div>}
+                    </div>
+                    <button
+                      className="di-small-btn di-small-btn-ghost"
+                      style={{ marginLeft: 8 }}
+                      onClick={() => resolveMissing(entry.data)}
+                    >
+                      <CircleCheck size={13} /> Restored
+                    </button>
+                  </li>
+                )
+              )}
             </RoomGroup>
           ))
         )}
@@ -1863,29 +2323,39 @@ function Dashboard({ items, itemsById, activeFlags, backorderedItems, roomAudits
       <div className="di-panel">
         <div className="di-panel-head">
           <h3>Audits</h3>
-          <button className="di-ghost-btn" onClick={() => setView("rooms")}>
-            <ClipboardList size={13} /> Go to audits
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <button className="di-ghost-btn" onClick={() => setView("rooms")}>
+              <ClipboardList size={13} /> Go to audits
+            </button>
+            <button className="di-audits-collapse-btn" onClick={() => setAuditsOpen(!auditsOpen)}>
+              {!auditsOpen && neverAuditedCount > 0 && (
+                <span className="di-panel-count">{neverAuditedCount} never audited</span>
+              )}
+              {auditsOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+            </button>
+          </div>
         </div>
-        <ul className="di-alert-list">
-          {roomAudits.map(({ room, audit }) => (
-            <li key={room} className="di-alert-row">
-              <span className="di-status-dot" style={{ background: audit ? "var(--green)" : "var(--amber)" }} />
-              <div className="di-alert-main">
-                <div className="di-alert-name">{room}</div>
-                {audit && (
-                  <div className="di-alert-meta">
-                    {audit.reviewedCount} reviewed{audit.flaggedCount > 0 ? ` · ${audit.flaggedCount} flagged` : ""}
-                  </div>
-                )}
-              </div>
-              <div className="di-alert-figures">
-                <div className="di-alert-stock">{audit ? timeAgo(audit.date) : "Not yet audited"}</div>
-                {audit && audit.staff && <div className="di-alert-days">by {audit.staff}</div>}
-              </div>
-            </li>
-          ))}
-        </ul>
+        {auditsOpen && (
+          <ul className="di-alert-list">
+            {roomAudits.map(({ room, audit }) => (
+              <li key={room} className="di-alert-row">
+                <span className="di-status-dot" style={{ background: audit ? "var(--green)" : "var(--amber)" }} />
+                <div className="di-alert-main">
+                  <div className="di-alert-name">{room}</div>
+                  {audit && (
+                    <div className="di-alert-meta">
+                      {audit.reviewedCount} reviewed{audit.flaggedCount > 0 ? ` · ${audit.flaggedCount} flagged` : ""}
+                    </div>
+                  )}
+                </div>
+                <div className="di-alert-figures">
+                  <div className="di-alert-stock">{audit ? timeAgo(audit.date) : "Not yet audited"}</div>
+                  {audit && audit.staff && <div className="di-alert-days">by {audit.staff}</div>}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       <div className="di-reset-row">
@@ -1974,11 +2444,14 @@ function PageHeader({ eyebrow, title, sub }) {
 /* ============================================================================
    REPORT LOW STOCK -- the screen every room actually uses
 ============================================================================ */
-function ReportLowStock({ items, activeFlags, myRoom, setMyRoom, myName, setMyName, onToggle }) {
+function ReportOrAlert({ items, activeFlags, myRoom, setMyRoom, myName, setMyName, onToggle, onSendAlert }) {
+  const [mode, setMode] = useState("stock"); // "stock" | "urgent"
   const [room, setRoom] = useState(myRoom || ROOMS[0]);
   const [query, setQuery] = useState("");
+  const [message, setMessage] = useState("");
   const [staff, setStaff] = useState("");
   const [editingRoom, setEditingRoom] = useState(!myRoom);
+  const [justSent, setJustSent] = useState(false);
 
   useEffect(() => {
     if (myRoom) setRoom(myRoom);
@@ -2008,12 +2481,20 @@ function ReportLowStock({ items, activeFlags, myRoom, setMyRoom, myName, setMyNa
     setEditingRoom(false);
   };
 
+  const sendAlert = () => {
+    if (!message.trim()) return;
+    onSendAlert({ room, message: message.trim(), staff });
+    setMessage("");
+    setJustSent(true);
+    setTimeout(() => setJustSent(false), 2500);
+  };
+
   return (
     <div className="di-page">
       <PageHeader
         eyebrow="One tap"
-        title="Report low stock"
-        sub="Find the item, tap the flag. That's it -- no counting needed."
+        title="Report or alert"
+        sub="Flag something low for the usual flow, or send an urgent alert straight to every screen right now."
       />
 
       <div className="di-panel di-room-panel">
@@ -2050,78 +2531,115 @@ function ReportLowStock({ items, activeFlags, myRoom, setMyRoom, myName, setMyNa
         </div>
       </div>
 
-      {flagsForRoom.length > 0 && (
-        <div className="di-panel">
-          <div className="di-panel-head">
-            <h3>Currently flagged in {room}</h3>
-            <span className="di-panel-count">{flagsForRoom.length}</span>
+      <div className="di-mode-toggle">
+        <button className={mode === "stock" ? "is-active" : ""} onClick={() => setMode("stock")}>
+          <Flag size={14} /> Low stock
+        </button>
+        <button className={mode === "urgent" ? "is-active" : ""} onClick={() => setMode("urgent")}>
+          <Bell size={14} /> Urgent alert
+        </button>
+      </div>
+
+      {mode === "stock" ? (
+        <>
+          {flagsForRoom.length > 0 && (
+            <div className="di-panel">
+              <div className="di-panel-head">
+                <h3>Currently flagged in {room}</h3>
+                <span className="di-panel-count">{flagsForRoom.length}</span>
+              </div>
+              <ul className="di-activity-list">
+                {flagsForRoom.map((f) => {
+                  const item = items.find((i) => i.id === f.itemId);
+                  if (!item) return null;
+                  return (
+                    <li key={flagKeyReact(f)} className="di-activity-row">
+                      <span className="di-activity-icon di-activity-used">
+                        <Flag size={15} />
+                      </span>
+                      <div className="di-activity-main">
+                        <div className="di-cell-name">{item.name}</div>
+                        <div className="di-cell-sub">Flagged {timeAgo(f.flaggedAt)}</div>
+                      </div>
+                      <button
+                        className="di-small-btn"
+                        onClick={() => onToggle({ itemId: item.id, room, staff })}
+                      >
+                        <Undo2 size={13} /> Restocked
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+
+          <div className="di-panel">
+            <div className="di-panel-head">
+              <h3>Flag something new</h3>
+            </div>
+            <div className="di-search di-search-wide">
+              <Search size={15} />
+              <input
+                placeholder="Search item name or code…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </div>
+            {query.length > 0 && matches.length === 0 && (
+              <div className="di-empty">
+                <Info size={16} />
+                <span>No matching items.</span>
+              </div>
+            )}
+            {matches.length > 0 && (
+              <ul className="di-activity-list" style={{ marginTop: 10 }}>
+                {matches.map((m) => (
+                  <li key={m.id} className="di-activity-row">
+                    <div className="di-activity-main">
+                      <div className="di-cell-name">{m.name}</div>
+                      <div className="di-cell-sub">{m.category}</div>
+                    </div>
+                    <button
+                      className="di-small-btn di-flag-btn"
+                      onClick={() => {
+                        onToggle({ itemId: m.id, room, staff });
+                        setQuery("");
+                      }}
+                    >
+                      <Flag size={13} /> Flag as low
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
-          <ul className="di-activity-list">
-            {flagsForRoom.map((f) => {
-              const item = items.find((i) => i.id === f.itemId);
-              if (!item) return null;
-              return (
-                <li key={flagKeyReact(f)} className="di-activity-row">
-                  <span className="di-activity-icon di-activity-used">
-                    <Flag size={15} />
-                  </span>
-                  <div className="di-activity-main">
-                    <div className="di-cell-name">{item.name}</div>
-                    <div className="di-cell-sub">Flagged {timeAgo(f.flaggedAt)}</div>
-                  </div>
-                  <button
-                    className="di-small-btn"
-                    onClick={() => onToggle({ itemId: item.id, room, staff })}
-                  >
-                    <Undo2 size={13} /> Restocked
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+        </>
+      ) : (
+        <div className="di-panel">
+          <div className="di-hint-text" style={{ padding: "0 2px 10px" }}>
+            For genuine emergencies -- this shows up instantly, on every screen, on every device that has
+            the app open right now.
+          </div>
+          <div className="di-field">
+            <label>What do you need?</label>
+            <input
+              placeholder="e.g. Need composite ASAP, need another pair of hands…"
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && sendAlert()}
+            />
+          </div>
+          <button className="di-urgent-send-btn" disabled={!message.trim()} onClick={sendAlert}>
+            <Bell size={16} /> Send urgent alert
+          </button>
+          {justSent && (
+            <div className="di-toast" style={{ marginTop: 10 }}>
+              <CircleCheck size={14} /> Sent to every device right now
+            </div>
+          )}
         </div>
       )}
-
-      <div className="di-panel">
-        <div className="di-panel-head">
-          <h3>Flag something new</h3>
-        </div>
-        <div className="di-search di-search-wide">
-          <Search size={15} />
-          <input
-            placeholder="Search item name or code…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-        </div>
-        {query.length > 0 && matches.length === 0 && (
-          <div className="di-empty">
-            <Info size={16} />
-            <span>No matching items.</span>
-          </div>
-        )}
-        {matches.length > 0 && (
-          <ul className="di-activity-list" style={{ marginTop: 10 }}>
-            {matches.map((m) => (
-              <li key={m.id} className="di-activity-row">
-                <div className="di-activity-main">
-                  <div className="di-cell-name">{m.name}</div>
-                  <div className="di-cell-sub">{m.category}</div>
-                </div>
-                <button
-                  className="di-small-btn di-flag-btn"
-                  onClick={() => {
-                    onToggle({ itemId: m.id, room, staff });
-                    setQuery("");
-                  }}
-                >
-                  <Flag size={13} /> Flag as low
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
     </div>
   );
 }
@@ -2273,9 +2791,18 @@ function AuditRoom({
     setCustomText("");
   };
 
+  // Finishing an audit counts everything that wasn't crossed as present:
+  // any item still unmarked is ticked "ok" here, so nobody has to tap every
+  // single check. Items already crossed as missing stay missing.
   const finishAudit = () => {
-    const statuses = allChecklistItems.map((i) => roomStatus[i.id]?.status).filter(Boolean);
-    const customStatuses = customItems.map((c) => c.status).filter(Boolean);
+    allChecklistItems.forEach((i) => {
+      if (!roomStatus[i.id]?.status) onSetItemStatus(room, i.id, "ok", staff);
+    });
+    customItems.forEach((c) => {
+      if (!c.status) onSetCustomStatus(room, c.id, "ok", staff, c.text);
+    });
+    const statuses = allChecklistItems.map((i) => roomStatus[i.id]?.status || "ok");
+    const customStatuses = customItems.map((c) => c.status || "ok");
     const allStatuses = [...statuses, ...customStatuses];
     const reviewedCount = allStatuses.length;
     const flaggedCount = allStatuses.filter((s) => s === "attention").length;
@@ -2346,7 +2873,7 @@ function AuditRoom({
                   </button>
                   <button
                     className={`di-audit-btn-cross ${c.status === "attention" ? "is-active" : ""}`}
-                    onClick={() => onSetCustomStatus(room, c.id, "attention", staff)}
+                    onClick={() => onSetCustomStatus(room, c.id, "attention", staff, c.text)}
                     title="Needs attention"
                   >
                     <X size={16} />
@@ -2377,6 +2904,9 @@ function AuditRoom({
         </div>
       </div>
 
+      <div className="di-hint-text" style={{ marginBottom: 8 }}>
+        Finishing marks anything you haven't crossed as present.
+      </div>
       <button className="di-primary-btn" onClick={finishAudit}>
         Finish audit
       </button>
@@ -2437,9 +2967,13 @@ function AuditSection({ section, sectionItems, roomStatus, onSetStatus, onRemove
 
 
 function Trends({ items, history, setView }) {
-  const [depletionRoom, setDepletionRoom] = useState("Sterilisation");
+  const [missingRoom, setMissingRoom] = useState("All rooms");
 
-  const depletionRanking = itemDepletionRanking(items, history, depletionRoom);
+  // Depletion chart is Sterilisation-only: that's the room where stock
+  // running out actually matters.
+  const depletionRanking = itemDepletionRanking(items, history, "Sterilisation");
+  const missingRanking = instrumentMissingRanking(history, missingRoom);
+  const missingTotal = history.filter((h) => h.action === "instrument_missing").length;
   const roomDemand = roomDemandRanking(history);
   const overconsumption = overconsumptionOutliers(items, history);
   const resolutionStats = computeResolutionStats(history);
@@ -2499,18 +3033,10 @@ function Trends({ items, history, setView }) {
 
       <div className="di-panel">
         <div className="di-panel-head">
-          <h3>Most frequently depleted items</h3>
-          <select value={depletionRoom} onChange={(e) => setDepletionRoom(e.target.value)}>
-            <option value="All rooms">All rooms</option>
-            {ROOMS.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-          </select>
+          <h3>Most frequently depleted items · Sterilisation</h3>
         </div>
         {depletionRanking.length === 0 ? (
-          <EmptyState icon={Info} text="No flags recorded for this room yet." />
+          <EmptyState icon={Info} text="No Sterilisation flags recorded yet." />
         ) : (
           <div className="di-chart-wrap">
             <ResponsiveContainer width="100%" height={Math.max(180, depletionRanking.length * 34)}>
@@ -2526,10 +3052,49 @@ function Trends({ items, history, setView }) {
                 <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11, fill: "var(--ink-soft)" }} />
                 <YAxis type="category" dataKey="name" width={170} tick={{ fontSize: 11, fill: "var(--ink)" }} />
                 <Tooltip
-                  formatter={(v) => [`${v} times`, `Flagged in ${depletionRoom}`]}
+                  formatter={(v) => [`${v} times`, "Flagged in Sterilisation"]}
                   contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid var(--line)" }}
                 />
                 <Bar dataKey="count" radius={[0, 4, 4, 0]} fill="var(--clay)" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+
+      <div className="di-panel">
+        <div className="di-panel-head">
+          <h3>Most frequently missing instruments</h3>
+          <select value={missingRoom} onChange={(e) => setMissingRoom(e.target.value)}>
+            <option value="All rooms">All rooms</option>
+            {ROOMS.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="di-hint-text">
+          Counts each time someone marks a room item as missing during an audit. Tracking started when this
+          feature went live, so earlier audits aren't included.
+        </div>
+        {missingRanking.length === 0 ? (
+          <EmptyState
+            icon={Info}
+            text={missingTotal === 0 ? "Nothing marked missing yet -- counts build up from here." : "No missing items recorded for this room yet."}
+          />
+        ) : (
+          <div className="di-chart-wrap">
+            <ResponsiveContainer width="100%" height={Math.max(180, missingRanking.length * 34)}>
+              <BarChart data={missingRanking} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--line)" horizontal={false} />
+                <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11, fill: "var(--ink-soft)" }} />
+                <YAxis type="category" dataKey="name" width={170} tick={{ fontSize: 11, fill: "var(--ink)" }} />
+                <Tooltip
+                  formatter={(v) => [`${v} times`, "Marked missing"]}
+                  contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid var(--line)" }}
+                />
+                <Bar dataKey="count" radius={[0, 4, 4, 0]} fill="var(--red)" />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -2991,90 +3556,6 @@ function OrderRequests({ orderRequests, myRoom, onSubmit, onFulfill }) {
   );
 }
 
-/* ============================================================================
-   URGENT ALERT -- deliberately minimal. The whole point is speed in a
-   genuinely urgent moment, so this is room + message + one big button,
-   nothing to configure or think about.
-============================================================================ */
-function SendUrgentAlert({ myRoom, myName, setMyName, onSend }) {
-  const [room, setRoom] = useState(myRoom || ROOMS[0]);
-  const [message, setMessage] = useState("");
-  const [staff, setStaff] = useState("");
-  const [justSent, setJustSent] = useState(false);
-
-  useEffect(() => {
-    if (myRoom) setRoom(myRoom);
-  }, [myRoom]);
-
-  useEffect(() => {
-    if (myName) setStaff(myName);
-  }, [myName]);
-
-  const send = () => {
-    if (!message.trim()) return;
-    onSend({ room, message: message.trim(), staff });
-    setMessage("");
-    setJustSent(true);
-    setTimeout(() => setJustSent(false), 2500);
-  };
-
-  return (
-    <div className="di-page">
-      <PageHeader
-        eyebrow="For genuine emergencies"
-        title="Urgent Alert"
-        sub="This shows up instantly, on every screen, on every device that has the app open right now."
-      />
-
-      <div className="di-panel">
-        <div className="di-field-row">
-          <div className="di-field">
-            <label>Room</label>
-            <select value={room} onChange={(e) => setRoom(e.target.value)}>
-              {ROOMS.map((r) => (
-                <option key={r}>{r}</option>
-              ))}
-            </select>
-          </div>
-          <div className="di-field">
-            <label>Your name (optional)</label>
-            <input
-              placeholder="e.g. Jess"
-              value={staff}
-              onChange={(e) => setStaff(e.target.value)}
-              onBlur={() => staff && setMyName(staff)}
-            />
-          </div>
-        </div>
-
-        <div className="di-field" style={{ marginTop: 12 }}>
-          <label>What do you need?</label>
-          <input
-            placeholder="e.g. Need composite ASAP, need another pair of hands…"
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && send()}
-          />
-        </div>
-
-        <button className="di-urgent-send-btn" disabled={!message.trim()} onClick={send}>
-          <Bell size={16} /> Send urgent alert
-        </button>
-        {justSent && (
-          <div className="di-toast" style={{ marginTop: 10 }}>
-            <CircleCheck size={14} /> Sent to every device right now
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ============================================================================
-   FEEDBACK -- anyone can submit, but there's no login system in this app,
-   so "private to the owner" isn't something this can technically enforce --
-   it's a shared channel everyone can see, same as every other page here.
-============================================================================ */
 function Feedback({ feedback, onSubmit, onReview, myName, setMyName }) {
   const [message, setMessage] = useState("");
   const [name, setName] = useState("");
@@ -3249,6 +3730,10 @@ const CSS = `
 }
 .di-brand-sub { font-size: 11px; color: #A79E8B; }
 .di-nav { display: flex; flex-direction: column; gap: 3px; }
+.di-nav-label {
+  font-size: 10.5px; font-weight: 600; letter-spacing: 0.04em; color: #8A8272;
+  padding: 8px 10px 2px; text-transform: uppercase;
+}
 .di-nav-btn {
   display: flex; align-items: center; gap: 9px;
   padding: 9px 10px; border-radius: 7px; border: none;
@@ -3258,6 +3743,20 @@ const CSS = `
 }
 .di-nav-btn:hover { background: rgba(255,255,255,0.06); color: #fff; }
 .di-nav-btn.is-active { background: var(--sand); color: var(--charcoal); font-weight: 600; }
+.di-nav-btn-sub { padding-left: 20px; font-size: 12.5px; color: #A9A190; }
+.di-nav-more-toggle {
+  display: flex; align-items: center; gap: 6px;
+  background: none; border: none; cursor: pointer; color: #8A8272;
+  font-size: 11px; font-family: inherit; padding: 10px 10px 2px; text-align: left;
+}
+.di-nav-more-toggle:hover { color: #C9C1AF; }
+.di-mode-toggle { display: flex; gap: 4px; background: var(--paper); border-radius: 8px; padding: 4px; margin-bottom: 16px; }
+.di-mode-toggle button {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
+  background: none; border: none; border-radius: 6px; padding: 9px 12px;
+  font-size: 13px; font-family: inherit; color: var(--ink-soft); cursor: pointer;
+}
+.di-mode-toggle button.is-active { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
 .di-rail-footer { margin-top: auto; font-size: 11px; color: #8A8272; line-height: 1.5; }
 .di-main { flex: 1; padding: 32px 40px 60px; overflow-y: auto; }
 .di-page { max-width: 920px; }
@@ -3516,6 +4015,10 @@ const CSS = `
   background: var(--red-bg); color: var(--red); padding: 1px 7px; border-radius: 20px; font-weight: 600;
   text-transform: none; letter-spacing: normal;
 }
+.di-audits-collapse-btn {
+  display: flex; align-items: center; gap: 8px; background: none; border: none;
+  cursor: pointer; color: var(--ink-soft); padding: 4px;
+}
 .di-back-link { display: inline-block; margin-bottom: 10px; font-size: 12.5px; }
 .di-audit-row {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
@@ -3542,4 +4045,83 @@ const CSS = `
   .di-rooms-grid { grid-template-columns: 1fr; }
   .di-urgent-stack { left: 0; }
 }
+
+/* ---- floor map ---- */
+.di-hint-inline { font-size: 12px; color: var(--ink-soft); }
+.di-u { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); grid-template-rows: repeat(35, 9px) minmax(46px, auto) 14px minmax(52px, auto); column-gap: 6px; row-gap: 0; }
+.di-u > .di-tile { margin: 3px 0; }
+.di-tile {
+  position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; padding: 4px; border-radius: 12px; border: 2px solid transparent; min-width: 0;
+  background: var(--green-bg); color: var(--green); cursor: pointer; font-family: inherit;
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.di-tile:hover { transform: translateY(-2px); box-shadow: 0 6px 14px rgba(0,0,0,.08); }
+.di-tile:active { transform: scale(.97); }
+.di-tile.is-flag { background: var(--red-bg); color: var(--red); }
+.di-tile.is-missing { background: var(--amber-bg); color: var(--clay); }
+.di-tile.is-urgent { background: #B3261E; color: #fff; animation: di-pulse 1.8s ease-in-out infinite; }
+.di-tile.is-mine { border-color: var(--ink); }
+.di-tile-label { font-size: 17px; font-weight: 700; line-height: 1; }
+.di-tile.is-steri { border-radius: 18px; background-image: repeating-linear-gradient(135deg, transparent 0 14px, rgba(255,255,255,.35) 14px 16px); }
+.di-tile.is-steri .di-tile-label { font-size: 18px; letter-spacing: .04em; }
+.di-tile.is-lab { flex-direction: row; gap: 10px; }
+.di-tile.is-lab .di-tile-label { font-size: 15px; }
+.di-tile-badges { display: flex; align-items: center; gap: 4px; }
+.di-tile.is-room .di-tile-badges { position: absolute; top: -6px; right: -4px; gap: 2px; }
+.di-tile-badge { font-size: 10px; font-weight: 700; border-radius: 20px; padding: 1px 6px; color: #fff; display: inline-flex; align-items: center; box-shadow: 0 0 0 2px #fff; }
+.di-tile-badge-flag { background: var(--red); }
+.di-tile-badge-missing { background: var(--clay); }
+.di-tile-badge-urgent { background: #fff; color: #B3261E; }
+.di-tile.is-urgent .di-tile-badge-flag { background: #7A1B16; }
+.di-tile-here { position: absolute; bottom: -7px; font-size: 8.5px; background: var(--ink); color: #fff; padding: 1px 5px; border-radius: 10px; white-space: nowrap; }
+@media (min-width: 560px) { .di-tile-label { font-size: 22px; }  }
+.di-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 14px; font-size: 11.5px; color: var(--ink-soft); }
+.di-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.di-legend-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+@keyframes di-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(179,38,30,.45); } 50% { box-shadow: 0 0 0 8px rgba(179,38,30,0); } }
+
+/* ---- room sheet ---- */
+.di-sheet-backdrop {
+  position: fixed; inset: 0; background: rgba(20,16,10,.45); z-index: 60;
+  display: flex; align-items: flex-end; justify-content: center; animation: di-fade .18s ease;
+}
+.di-sheet {
+  background: #fff; width: 100%; max-width: 560px; max-height: 88vh; overflow-y: auto;
+  border-radius: 20px 20px 0 0; padding: 20px 18px 24px; animation: di-slide .22s ease;
+}
+@media (min-width: 700px) { .di-sheet-backdrop { align-items: center; } .di-sheet { border-radius: 20px; } }
+.di-sheet-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 14px; }
+.di-sheet-eyebrow { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-soft); }
+.di-sheet-title { margin: 2px 0 4px; font-size: 24px; }
+.di-sheet-status { font-size: 13px; display: flex; align-items: center; gap: 5px; }
+.di-sheet-close { background: var(--paper); border: none; border-radius: 50%; width: 34px; height: 34px; display: grid; place-items: center; cursor: pointer; }
+.di-sheet-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 16px; }
+.di-sheet-stat { background: var(--paper); border-radius: 12px; padding: 10px 6px; text-align: center; }
+.di-sheet-stat-num { font-size: 18px; font-weight: 700; }
+.di-sheet-stat-label { font-size: 10.5px; color: var(--ink-soft); margin-top: 2px; }
+.di-sheet-alert { display: flex; gap: 10px; background: #FBE3E0; color: #B3261E; border-radius: 12px; padding: 10px 12px; margin-bottom: 14px; font-size: 13px; }
+.di-sheet-section { margin-top: 16px; }
+.di-sheet-section-title { font-size: 12px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 6px; }
+.di-sheet-empty { font-size: 13px; color: var(--ink-soft); }
+.di-sheet-line { font-size: 13px; margin-bottom: 4px; line-height: 1.45; }
+.di-sheet-activity { list-style: none; margin: 0; padding: 0; }
+.di-sheet-activity li { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.di-sheet-cta-wrap { position: sticky; bottom: -24px; margin: 18px -18px -24px; padding: 12px 18px 24px; background: linear-gradient(to top, #fff 75%, rgba(255,255,255,0)); }
+.di-sheet-cta { width: 100%; justify-content: center; padding: 12px; }
+@keyframes di-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes di-slide { from { transform: translateY(30px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* ---- lost & found notes ---- */
+.di-notes { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; padding: 6px 4px 4px; }
+.di-note {
+  border-radius: 4px 4px 14px 4px; padding: 12px 12px 10px; min-height: 110px; display: flex; flex-direction: column;
+  box-shadow: 0 3px 8px rgba(0,0,0,.12); transition: transform .45s ease, opacity .45s ease;
+}
+.di-note.is-leaving { opacity: 0; transform: scale(.6) rotate(8deg) translateY(-20px) !important; }
+.di-note-name { font-weight: 700; font-size: 14px; line-height: 1.25; }
+.di-note-room { font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
+.di-note-foot { margin-top: auto; padding-top: 10px; display: flex; flex-direction: column; gap: 6px; font-size: 11px; color: var(--ink-soft); }
+.di-note-btn { background: #fff; border: 1px solid var(--line); border-radius: 20px; padding: 5px 10px; font-weight: 600; font-size: 12px; cursor: pointer; font-family: inherit; }
+.di-note-btn:hover { background: var(--green-bg); color: var(--green); }
 `;
