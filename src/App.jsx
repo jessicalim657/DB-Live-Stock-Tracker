@@ -275,11 +275,43 @@ const SEED_ITEMS = [
 ];
 
 /* 17 treatment rooms plus the two shared stock locations. Edit freely. */
+// Rooms that physically exist but can't be used. They're blocked out on the
+// floor map and left out of everything else (audits, flags, trends).
+const UNUSABLE_ROOMS = ["Room 10"];
 const ROOMS = [
-  ...Array.from({ length: 18 }, (_, i) => `Room ${i + 1}`),
+  ...Array.from({ length: 18 }, (_, i) => `Room ${i + 1}`).filter((r) => !UNUSABLE_ROOMS.includes(r)),
   "Sterilisation",
   "Lab",
 ];
+
+// Colours a DA can pick for their room.
+const ROOM_COLORS = [
+  { id: "coral", label: "Coral", hex: "#E76F51" },
+  { id: "red", label: "Red", hex: "#D64545" },
+  { id: "crimson", label: "Crimson", hex: "#A4243B" },
+  { id: "orange", label: "Orange", hex: "#F29E4C" },
+  { id: "amber", label: "Amber", hex: "#E8A317" },
+  { id: "yellow", label: "Yellow", hex: "#F2D45C" },
+  { id: "lime", label: "Lime", hex: "#B5CC4A" },
+  { id: "green", label: "Green", hex: "#5BAA6E" },
+  { id: "forest", label: "Forest", hex: "#2F7D4F" },
+  { id: "mint", label: "Mint", hex: "#8FD6B0" },
+  { id: "teal", label: "Teal", hex: "#2A9D8F" },
+  { id: "cyan", label: "Cyan", hex: "#3CBFD9" },
+  { id: "sky", label: "Sky", hex: "#7CB9F0" },
+  { id: "blue", label: "Blue", hex: "#4A90D9" },
+  { id: "navy", label: "Navy", hex: "#2F4B8A" },
+  { id: "indigo", label: "Indigo", hex: "#5B5BD6" },
+  { id: "purple", label: "Purple", hex: "#8E6BBF" },
+  { id: "violet", label: "Violet", hex: "#B18AE0" },
+  { id: "magenta", label: "Magenta", hex: "#C2409F" },
+  { id: "pink", label: "Pink", hex: "#E58CAF" },
+  { id: "rose", label: "Rose", hex: "#F4A6B8" },
+  { id: "brown", label: "Brown", hex: "#8B5E3C" },
+  { id: "tan", label: "Tan", hex: "#C9A27A" },
+  { id: "slate", label: "Slate", hex: "#6B7A8F" },
+];
+const NO_COLOR_HEX = "#9A968C";
 
 const WHITENING_PRODUCTS = ["Pola Rapid Whitening", "Zoom Whitening"];
 const ORDER_TYPES = ["Take-Home Gels", "In Chair"];
@@ -775,6 +807,7 @@ export default function DentalInventoryApp() {
   const [urgentAlerts, setUrgentAlerts] = useState(null); // [{id, room, message, staff, status, createdAt, resolvedBy, resolvedAt}]
   const [auditChecklist, setAuditChecklist] = useState(null); // [itemId, ...] -- shared base list, same for every treatment room
   const [roomCustomAuditItems, setRoomCustomAuditItems] = useState(null); // { [room]: [{id, text, status, updatedAt, updatedBy}] }
+  const [roomSettings, setRoomSettings] = useState({}); // { [room]: { color, name } }
   const [roomAuditStatus, setRoomAuditStatus] = useState(null); // { [room]: { [checklistItemId]: {status, updatedAt, updatedBy} } }
   const [auditRoom, setAuditRoom] = useState(null); // which room's audit page is open right now
   const [myRoom, setMyRoomState] = useState(null);
@@ -972,6 +1005,19 @@ export default function DentalInventoryApp() {
       () => setSaveError("Couldn't reach the database -- check firebase.js is filled in.")
     );
 
+    const unsubRoomSettings = onSnapshot(
+      query(collection(db, "roomSettings")),
+      (snap) => {
+        const byRoom = {};
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          byRoom[data.room] = { color: data.color || "", name: data.name || "" };
+        });
+        setRoomSettings(byRoom);
+      },
+      () => {}
+    );
+
     const unsubRoomCustomAuditItems = onSnapshot(
       roomCustomAuditItemsQuery,
       (snap) => {
@@ -1010,6 +1056,7 @@ export default function DentalInventoryApp() {
       unsubUrgentAlerts();
       unsubAuditChecklist();
       unsubRoomCustomAuditItems();
+      unsubRoomSettings();
       unsubRoomAuditStatus();
     };
   }, []);
@@ -1234,6 +1281,14 @@ export default function DentalInventoryApp() {
   const removeCustomAuditItem = useCallback((room, itemId) => {
     deleteDoc(doc(db, "roomCustomAuditItems", itemId)).catch(() =>
       setSaveError("Couldn't save -- check your connection.")
+    );
+  }, []);
+
+  // A room's colour and/or display name (e.g. "Jess & Richard"). One
+  // document per room, merged, so changing the colour never wipes the name.
+  const setRoomSetting = useCallback((room, patch) => {
+    setDoc(doc(db, "roomSettings", room), { room, ...patch, updatedAt: new Date().toISOString() }, { merge: true }).catch(
+      () => setSaveError("Couldn't save -- check your connection.")
     );
   }, []);
 
@@ -1505,6 +1560,7 @@ export default function DentalInventoryApp() {
     });
     const results = [];
     Object.entries(roomAuditStatus).forEach(([room, statuses]) => {
+      if (UNUSABLE_ROOMS.includes(room)) return;
       Object.entries(statuses || {}).forEach(([itemId, info]) => {
         // If this item no longer exists on the checklist (removed since
         // this status was set), there's nothing meaningful to show --
@@ -1522,6 +1578,7 @@ export default function DentalInventoryApp() {
       });
     });
     Object.entries(roomCustomAuditItems).forEach(([room, list]) => {
+      if (UNUSABLE_ROOMS.includes(room)) return;
       (list || []).forEach((c) => {
         if (c.status === "attention") {
           results.push({
@@ -1537,6 +1594,30 @@ export default function DentalInventoryApp() {
     });
     return results.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
   }, [roomAuditStatus, roomCustomAuditItems, auditChecklist]);
+
+  // Blocked-out rooms are invisible everywhere except the floor map.
+  const usableFlags = useMemo(
+    () => (activeFlags || []).filter((f) => !UNUSABLE_ROOMS.includes(f.room)),
+    [activeFlags]
+  );
+  const usableHistory = useMemo(
+    () => (history || []).filter((h) => !UNUSABLE_ROOMS.includes(h.room)),
+    [history]
+  );
+
+  // One-off tidy-up: clear any audit data still stored against a blocked-out
+  // room so nothing lingers as "missing" there.
+  useEffect(() => {
+    if (loading || !roomAuditStatus || !roomCustomAuditItems) return;
+    UNUSABLE_ROOMS.forEach((room) => {
+      Object.keys(roomAuditStatus[room] || {}).forEach((itemId) => {
+        deleteDoc(doc(db, "roomAuditStatus", `${room}::${itemId}`)).catch(() => {});
+      });
+      (roomCustomAuditItems[room] || []).forEach((c) => {
+        deleteDoc(doc(db, "roomCustomAuditItems", c.id)).catch(() => {});
+      });
+    });
+  }, [loading, roomAuditStatus, roomCustomAuditItems]);
 
   if (loading) {
     return (
@@ -1555,12 +1636,14 @@ export default function DentalInventoryApp() {
         <Dashboard
           items={items}
           itemsById={itemsById}
-          history={history}
+          history={usableHistory}
+          roomSettings={roomSettings}
+          onSetRoomSetting={setRoomSetting}
           onOpenAudit={(room) => {
             setAuditRoom(room);
             setView("audit-room");
           }}
-          activeFlags={activeFlags}
+          activeFlags={usableFlags}
           backorderedItems={backorderedItems}
           roomAudits={roomAudits}
           openOrders={openOrders}
@@ -1579,7 +1662,7 @@ export default function DentalInventoryApp() {
       {view === "report" && (
         <ReportOrAlert
           items={items}
-          activeFlags={activeFlags}
+          activeFlags={usableFlags}
           myRoom={myRoom}
           setMyRoom={setMyRoom}
           myName={myName}
@@ -1591,7 +1674,7 @@ export default function DentalInventoryApp() {
       {view === "rooms" && (
         <RoomsOverview
           items={itemsById}
-          activeFlags={activeFlags}
+          activeFlags={usableFlags}
           missingAuditItems={missingAuditItems}
           onToggle={toggleFlag}
           onOpenAudit={(room) => {
@@ -1619,7 +1702,7 @@ export default function DentalInventoryApp() {
         />
       )}
       {view === "trends" && (
-        <Trends items={items} history={history} setView={setView} />
+        <Trends items={items} history={usableHistory} setView={setView} />
       )}
       {view === "catalogue" && (
         <Catalogue
@@ -1775,9 +1858,29 @@ function RoomGroup({ room, count, children }) {
 ============================================================================ */
 const TREATMENT_ROOMS = ROOMS.filter((r) => r !== "Sterilisation" && r !== "Lab");
 
+function ToothIcon({ color, size = 14 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M7.2 2.8c-2.3 0-4.2 1.8-4.2 4.6 0 2.1.8 3.4 1.4 5.2.6 1.9.6 4.9 1.7 7 .6 1.1 1.9 1.1 2.3-.1.4-1.1.6-3.1 1.3-3.9.4-.5 1-.5 1.4 0 .7.8.9 2.8 1.3 3.9.4 1.2 1.7 1.2 2.3.1 1.1-2.1 1.1-5.1 1.7-7 .6-1.8 1.4-3.1 1.4-5.2 0-2.8-1.9-4.6-4.2-4.6-1.5 0-2.4.7-3.8.7s-2.3-.7-3.8-.7z"
+        fill={color}
+        stroke="rgba(0,0,0,.35)"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+const colorHexFor = (roomSettings, room) => {
+  const id = roomSettings && roomSettings[room] ? roomSettings[room].color : "";
+  const found = ROOM_COLORS.find((c) => c.id === id);
+  return found ? found.hex : "";
+};
+
 // One tile per room, coloured by what's going on in it right now. Tapping a
 // tile opens that room's full picture (RoomSheet below).
-function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, onOpenRoom }) {
+function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, roomSettings, onOpenRoom }) {
   const auditByRoom = {};
   roomAudits.forEach(({ room, audit }) => (auditByRoom[room] = audit));
 
@@ -1802,6 +1905,11 @@ function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, 
         onClick={() => onOpenRoom(room)}
         aria-label={`${room}: ${st === "ok" ? "all good" : st}`}
       >
+        {colorHexFor(roomSettings, room) && (
+          <span className="di-tile-tooth">
+            <ToothIcon color={colorHexFor(roomSettings, room)} size={15} />
+          </span>
+        )}
         <span className="di-tile-label">{label}</span>
         <span className="di-tile-badges">
           {st === "urgent" && (
@@ -1839,6 +1947,17 @@ function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, 
       <div className="di-u">
         {renderTile("Sterilisation", "steri", { gridColumn: "2 / 6", gridRow: "14 / 36" })}
         {TREATMENT_ROOMS.map((r) => renderTile(r, "room", uPlacements[parseInt(r.slice(5), 10)]))}
+        {UNUSABLE_ROOMS.map((r) => (
+          <div
+            key={r}
+            className="di-tile is-room is-blocked"
+            style={uPlacements[parseInt(r.slice(5), 10)]}
+            aria-label={`${r}: not a usable room`}
+            title="Not a usable room"
+          >
+            <span className="di-tile-label">{r.slice(5)}</span>
+          </div>
+        ))}
         {renderTile("Lab", "lab", { gridColumn: "2 / 6", gridRow: 38 })}
       </div>
       <div className="di-legend">
@@ -1862,11 +1981,26 @@ function RoomSheet({
   openAlerts,
   roomAudits,
   myName,
+  roomSettings,
+  onSetRoomSetting,
   onToggle,
   onResolveMissing,
   onOpenAudit,
   onClose,
 }) {
+  const settings = (roomSettings && roomSettings[room]) || { color: "", name: "" };
+  const [nameDraft, setNameDraft] = useState(settings.name || "");
+  useEffect(() => {
+    setNameDraft(settings.name || "");
+  }, [settings.name]);
+  // Colours already chosen by other rooms are blocked out.
+  const takenColors = {};
+  Object.entries(roomSettings || {}).forEach(([r, v]) => {
+    if (r !== room && v && v.color && !UNUSABLE_ROOMS.includes(r)) takenColors[v.color] = r;
+  });
+  const saveName = () => {
+    if (nameDraft.trim() !== (settings.name || "")) onSetRoomSetting(room, { name: nameDraft.trim() });
+  };
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -1916,6 +2050,7 @@ function RoomSheet({
           <div>
             <div className="di-sheet-eyebrow">{isTreatment ? "Treatment room" : "Shared space"}</div>
             <h2 className="di-sheet-title">{room}</h2>
+            {settings.name && <div className="di-sheet-roomname">{settings.name}</div>}
             <div className="di-sheet-status">
               {allGood ? (
                 <span style={{ color: "var(--green)" }}>
@@ -1933,6 +2068,38 @@ function RoomSheet({
             <X size={18} />
           </button>
         </div>
+
+        {isTreatment && (
+          <div className="di-sheet-details">
+            <input
+              className="di-sheet-name-input"
+              placeholder="Add a name, e.g. Jess & Richard"
+              value={nameDraft}
+              maxLength={40}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={saveName}
+              onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+            />
+            <div className="di-swatches" role="group" aria-label="Room colour">
+              {ROOM_COLORS.map((c) => (
+                (() => {
+                  const takenBy = takenColors[c.id];
+                  return (
+                    <button
+                      key={c.id}
+                      className={`di-swatch${settings.color === c.id ? " is-active" : ""}${takenBy ? " is-taken" : ""}`}
+                      style={{ background: c.hex }}
+                      title={takenBy ? `${c.label} · taken by ${takenBy}` : c.label}
+                      aria-label={takenBy ? `${c.label}, taken by ${takenBy}` : c.label}
+                      disabled={!!takenBy}
+                      onClick={() => onSetRoomSetting(room, { color: settings.color === c.id ? "" : c.id })}
+                    />
+                  );
+                })()
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="di-sheet-stats">
           <div className="di-sheet-stat">
@@ -2072,10 +2239,14 @@ function RoomSheet({
 
 // Missing room items as sticky notes. Tapping "Found it" plays a short
 // pop-away animation, then marks the item as back in the room.
-function LostAndFound({ missingAuditItems, onResolveMissing }) {
+function LostAndFound({ missingAuditItems, roomSettings, onResolveMissing }) {
   const [leaving, setLeaving] = useState({});
+  const [filterName, setFilterName] = useState("All instruments");
   const noteKey = (m) => `${m.room}::${m.itemId}`;
-  const tints = ["#F6EBB8", "#F0DDD3", "#E4E5D9", "#E8E0F0"];
+
+  const names = Array.from(new Set(missingAuditItems.map((m) => m.name))).sort((a, b) => a.localeCompare(b));
+  const activeFilter = names.includes(filterName) ? filterName : "All instruments";
+  const shown = activeFilter === "All instruments" ? missingAuditItems : missingAuditItems.filter((m) => m.name === activeFilter);
 
   const found = (m) => {
     setLeaving((l) => ({ ...l, [noteKey(m)]: true }));
@@ -2093,38 +2264,58 @@ function LostAndFound({ missingAuditItems, onResolveMissing }) {
     <div className="di-panel">
       <div className="di-panel-head">
         <h3>Lost &amp; found</h3>
-        <span className="di-panel-count">{missingAuditItems.length}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {names.length > 1 && (
+            <select value={activeFilter} onChange={(e) => setFilterName(e.target.value)} aria-label="Filter by instrument">
+              <option value="All instruments">All instruments</option>
+              {names.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          )}
+          <span className="di-panel-count">{shown.length}</span>
+        </div>
       </div>
       {missingAuditItems.length === 0 ? (
         <EmptyState icon={CircleCheck} text="Nothing's gone missing. Everything's where it should be ✨" />
       ) : (
         <div className="di-notes">
-          {missingAuditItems.map((m, idx) => (
-            <div
-              key={noteKey(m)}
-              className={`di-note${leaving[noteKey(m)] ? " is-leaving" : ""}`}
-              style={{
-                background: tints[idx % tints.length],
-                transform: `rotate(${[-1.6, 1.2, -0.8, 1.8][idx % 4]}deg)`,
-              }}
-            >
-              <div className="di-note-name">{m.name}</div>
-              <div className="di-note-room">{m.room}</div>
-              <div className="di-note-foot">
-                <span>{m.updatedAt ? `missing ${timeAgo(m.updatedAt)}` : ""}</span>
-                <button className="di-note-btn" onClick={() => found(m)}>
-                  Found it!
-                </button>
+          {shown.map((m, idx) => {
+            const hex = colorHexFor(roomSettings, m.room) || NO_COLOR_HEX;
+            const roomName = roomSettings && roomSettings[m.room] ? roomSettings[m.room].name : "";
+            return (
+              <div
+                key={noteKey(m)}
+                className={`di-note${leaving[noteKey(m)] ? " is-leaving" : ""}`}
+                style={{
+                  background: `${hex}40`,
+                  borderTop: `5px solid ${hex}`,
+                  transform: `rotate(${[-1.6, 1.2, -0.8, 1.8][idx % 4]}deg)`,
+                }}
+              >
+                <div className="di-note-name">{m.name}</div>
+                <div className="di-note-room">
+                  {m.room}
+                  {roomName ? ` · ${roomName}` : ""}
+                </div>
+                <div className="di-note-foot">
+                  <span>{m.updatedAt ? `missing ${timeAgo(m.updatedAt)}` : ""}</span>
+                  <button className="di-note-btn" onClick={() => found(m)}>
+                    Found it!
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
-function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, roomAudits, openOrders, missingAuditItems, openAlerts, roomsAffected, myRoom, myName, setView, onToggle, onSetItemStatus, onSetCustomStatus, onRebuildFlags, onOpenAudit }) {
+function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, roomAudits, openOrders, missingAuditItems, openAlerts, roomsAffected, myRoom, myName, setView, onToggle, onSetItemStatus, onSetCustomStatus, onRebuildFlags, onOpenAudit, roomSettings, onSetRoomSetting }) {
   const [openRoom, setOpenRoom] = useState(null);
   const [listOpen, setListOpen] = useState(false);
   const [confirmingRebuild, setConfirmingRebuild] = useState(false);
@@ -2209,10 +2400,11 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
         alertRooms={alertRooms}
         roomAudits={roomAudits}
         myRoom={myRoom}
+        roomSettings={roomSettings}
         onOpenRoom={setOpenRoom}
       />
 
-      <LostAndFound missingAuditItems={missingAuditItems} onResolveMissing={resolveMissing} />
+      <LostAndFound missingAuditItems={missingAuditItems} roomSettings={roomSettings} onResolveMissing={resolveMissing} />
 
       {openRoom && (
         <RoomSheet
@@ -2225,6 +2417,8 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
           openAlerts={openAlerts}
           roomAudits={roomAudits}
           myName={myName}
+          roomSettings={roomSettings}
+          onSetRoomSetting={onSetRoomSetting}
           onToggle={onToggle}
           onResolveMissing={resolveMissing}
           onOpenAudit={(r) => {
@@ -4124,4 +4318,18 @@ const CSS = `
 .di-note-foot { margin-top: auto; padding-top: 10px; display: flex; flex-direction: column; gap: 6px; font-size: 11px; color: var(--ink-soft); }
 .di-note-btn { background: #fff; border: 1px solid var(--line); border-radius: 20px; padding: 5px 10px; font-weight: 600; font-size: 12px; cursor: pointer; font-family: inherit; }
 .di-note-btn:hover { background: var(--green-bg); color: var(--green); }
+
+/* ---- room colours / names / blocked ---- */
+.di-tile-tooth { position: absolute; top: -7px; left: -6px; width: 22px; height: 22px; border-radius: 50%; background: #fff; display: grid; place-items: center; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+.di-tile.is-blocked { background: #D8D5CD; color: #8E8A80; cursor: not-allowed; opacity: .75; background-image: repeating-linear-gradient(45deg, transparent 0 6px, rgba(0,0,0,.09) 6px 8px); }
+.di-tile.is-blocked .di-tile-label { text-decoration: line-through; }
+.di-tile.is-blocked:hover { transform: none; box-shadow: none; }
+.di-sheet-roomname { font-size: 14px; color: var(--ink-soft); margin: -2px 0 4px; }
+.di-sheet-details { background: var(--paper); border-radius: 12px; padding: 10px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 10px; }
+.di-sheet-name-input { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; font-family: inherit; font-size: 14px; background: #fff; }
+.di-swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+.di-swatch { width: 28px; height: 28px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line); cursor: pointer; padding: 0; }
+.di-swatch.is-active { box-shadow: 0 0 0 2px var(--ink); }
+.di-swatch.is-taken { opacity: .28; cursor: not-allowed; position: relative; }
+.di-swatch.is-taken::after { content: ""; position: absolute; left: 3px; right: 3px; top: 50%; height: 2px; background: var(--ink); transform: rotate(-45deg); }
 `;
