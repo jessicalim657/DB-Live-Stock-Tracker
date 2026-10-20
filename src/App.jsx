@@ -23,6 +23,7 @@ import {
   X,
   Trash2,
   ClipboardList,
+  Pencil,
   ChevronDown,
   ChevronRight,
   Bell,
@@ -1286,10 +1287,19 @@ export default function DentalInventoryApp() {
 
   // A room's colour and/or display name (e.g. "Jess & Richard"). One
   // document per room, merged, so changing the colour never wipes the name.
-  const setRoomSetting = useCallback((room, patch) => {
-    setDoc(doc(db, "roomSettings", room), { room, ...patch, updatedAt: new Date().toISOString() }, { merge: true }).catch(
-      () => setSaveError("Couldn't save -- check your connection.")
-    );
+  const setRoomSetting = useCallback(async (room, patch) => {
+    try {
+      await setDoc(doc(db, "roomSettings", room), { room, ...patch, updatedAt: new Date().toISOString() }, { merge: true });
+      return { ok: true };
+    } catch (e) {
+      const denied = e && e.code === "permission-denied";
+      setSaveError(
+        denied
+          ? "Room details need the updated Firestore rules -- publish firestore.rules in the Firebase console."
+          : "Couldn't save -- check your connection."
+      );
+      return { ok: false, denied };
+    }
   }, []);
 
   const setCustomAuditItemStatus = useCallback((room, itemId, status, staff, itemText) => {
@@ -1989,18 +1999,37 @@ function RoomSheet({
   onClose,
 }) {
   const settings = (roomSettings && roomSettings[room]) || { color: "", name: "" };
-  const [nameDraft, setNameDraft] = useState(settings.name || "");
-  useEffect(() => {
-    setNameDraft(settings.name || "");
-  }, [settings.name]);
+  const [editing, setEditing] = useState(false);
+  const [draftName, setDraftName] = useState("");
+  const [draftColor, setDraftColor] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
+  const startEdit = () => {
+    setDraftName(settings.name || "");
+    setDraftColor(settings.color || "");
+    setSaveMsg("");
+    setEditing(true);
+  };
+  const saveDetails = async () => {
+    setSaving(true);
+    setSaveMsg("");
+    const res = await onSetRoomSetting(room, { name: draftName.trim(), color: draftColor });
+    setSaving(false);
+    if (res && res.ok === false) {
+      setSaveMsg(
+        res.denied
+          ? "Couldn't save: the Firestore rules need updating to include roomSettings (publish firestore.rules in the Firebase console)."
+          : "Couldn't save -- check your connection and try again."
+      );
+    } else {
+      setEditing(false);
+    }
+  };
   // Colours already chosen by other rooms are blocked out.
   const takenColors = {};
   Object.entries(roomSettings || {}).forEach(([r, v]) => {
     if (r !== room && v && v.color && !UNUSABLE_ROOMS.includes(r)) takenColors[v.color] = r;
   });
-  const saveName = () => {
-    if (nameDraft.trim() !== (settings.name || "")) onSetRoomSetting(room, { name: nameDraft.trim() });
-  };
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -2071,33 +2100,62 @@ function RoomSheet({
 
         {isTreatment && (
           <div className="di-sheet-details">
-            <input
-              className="di-sheet-name-input"
-              placeholder="Add a name, e.g. Jess & Richard"
-              value={nameDraft}
-              maxLength={40}
-              onChange={(e) => setNameDraft(e.target.value)}
-              onBlur={saveName}
-              onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
-            />
-            <div className="di-swatches" role="group" aria-label="Room colour">
-              {ROOM_COLORS.map((c) => (
-                (() => {
-                  const takenBy = takenColors[c.id];
-                  return (
-                    <button
-                      key={c.id}
-                      className={`di-swatch${settings.color === c.id ? " is-active" : ""}${takenBy ? " is-taken" : ""}`}
-                      style={{ background: c.hex }}
-                      title={takenBy ? `${c.label} · taken by ${takenBy}` : c.label}
-                      aria-label={takenBy ? `${c.label}, taken by ${takenBy}` : c.label}
-                      disabled={!!takenBy}
-                      onClick={() => onSetRoomSetting(room, { color: settings.color === c.id ? "" : c.id })}
-                    />
-                  );
-                })()
-              ))}
-            </div>
+            {!editing ? (
+              <div className="di-details-view">
+                <div className="di-details-summary">
+                  {colorHexFor(roomSettings, room) ? (
+                    <ToothIcon color={colorHexFor(roomSettings, room)} size={20} />
+                  ) : (
+                    <ToothIcon color={NO_COLOR_HEX} size={20} />
+                  )}
+                  <span>
+                    {settings.name || settings.color
+                      ? `${settings.name || "No name"}${
+                          settings.color ? ` · ${(ROOM_COLORS.find((c) => c.id === settings.color) || {}).label || ""}` : ""
+                        }`
+                      : "No name or colour set"}
+                  </span>
+                </div>
+                <button className="di-small-btn di-small-btn-ghost" onClick={startEdit}>
+                  <Pencil size={13} /> Edit
+                </button>
+              </div>
+            ) : (
+              <>
+                <input
+                  className="di-sheet-name-input"
+                  placeholder="Add a name, e.g. Jess & Richard"
+                  value={draftName}
+                  maxLength={40}
+                  onChange={(e) => setDraftName(e.target.value)}
+                />
+                <div className="di-swatches" role="group" aria-label="Room colour">
+                  {ROOM_COLORS.map((c) => {
+                    const takenBy = takenColors[c.id];
+                    return (
+                      <button
+                        key={c.id}
+                        className={`di-swatch${draftColor === c.id ? " is-active" : ""}${takenBy ? " is-taken" : ""}`}
+                        style={{ background: c.hex }}
+                        title={takenBy ? `${c.label} · taken by ${takenBy}` : c.label}
+                        aria-label={takenBy ? `${c.label}, taken by ${takenBy}` : c.label}
+                        disabled={!!takenBy}
+                        onClick={() => setDraftColor(draftColor === c.id ? "" : c.id)}
+                      />
+                    );
+                  })}
+                </div>
+                {saveMsg && <div className="di-details-error">{saveMsg}</div>}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="di-small-btn" onClick={saveDetails} disabled={saving}>
+                    {saving ? "Saving…" : "Save"}
+                  </button>
+                  <button className="di-ghost-btn" onClick={() => setEditing(false)} disabled={saving}>
+                    Cancel
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
 
@@ -4326,6 +4384,9 @@ const CSS = `
 .di-tile.is-blocked:hover { transform: none; box-shadow: none; }
 .di-sheet-roomname { font-size: 14px; color: var(--ink-soft); margin: -2px 0 4px; }
 .di-sheet-details { background: var(--paper); border-radius: 12px; padding: 10px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 10px; }
+.di-details-view { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.di-details-summary { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.di-details-error { font-size: 12.5px; color: var(--red); background: var(--red-bg); border-radius: 8px; padding: 8px 10px; }
 .di-sheet-name-input { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; font-family: inherit; font-size: 14px; background: #fff; }
 .di-swatches { display: flex; flex-wrap: wrap; gap: 8px; }
 .di-swatch { width: 28px; height: 28px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line); cursor: pointer; padding: 0; }
