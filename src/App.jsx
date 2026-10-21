@@ -314,6 +314,46 @@ const ROOM_COLORS = [
 ];
 const NO_COLOR_HEX = "#9A968C";
 
+// The endo trolley in the Lab: two trays, each a 6 x 2 grid of file-size
+// sections. Section ids come from tray + position, so renaming a section
+// later never loses its saved status. Replace the placeholder names below
+// with the real file sizes, left to right, top row first.
+const ENDO_TROLLEY = [
+  {
+    id: "tray-a",
+    name: "0.04 taper",
+    rowLabels: ["25mm", "29mm"],
+    sections: [
+      "17.04", "20.04", "25.04", "30.04", "35.04", "40.04",
+      "17.04", "20.04", "25.04", "30.04", "35.04", "40.04",
+    ],
+  },
+  {
+    id: "tray-b",
+    name: "0.06 taper",
+    rowLabels: ["25mm", "21mm"],
+    sections: [
+      "17.06", "20.06", "25.06", "30.06", "35.06", "40.06/45.06",
+      "17.06", "20.06", "25.06", "30.06", "35.06", "40.06/45.06",
+    ],
+  },
+];
+const ENDO_STATUSES = [
+  { value: "full", label: "Full", color: "var(--green)", bg: "var(--green-bg)" },
+  { value: "low", label: "Low", color: "var(--amber)", bg: "var(--amber-bg)" },
+  { value: "out", label: "Out", color: "var(--red)", bg: "var(--red-bg)" },
+];
+const endoSectionId = (trayId, idx) => `${trayId}-${idx}`;
+// Human-readable name for a section id, e.g. "0.04 taper · 25".
+const endoSectionLabel = (sid) => {
+  for (const tray of ENDO_TROLLEY) {
+    const idx = tray.sections.findIndex((_, i) => endoSectionId(tray.id, i) === sid);
+    if (idx !== -1) return `${tray.name} · ${tray.rowLabels[Math.floor(idx / 6)]} · ${tray.sections[idx]}`;
+  }
+  return sid;
+};
+const ENDO_PREFIX = "endo:";
+
 const WHITENING_PRODUCTS = ["Pola Rapid Whitening", "Zoom Whitening"];
 const ORDER_TYPES = ["Take-Home Gels", "In Chair"];
 
@@ -534,6 +574,26 @@ function instrumentMissingRanking(history, room) {
     .map(([name, count]) => ({ name, count }))
     .sort((a, b) => b.count - a.count)
     .slice(0, 10);
+}
+
+// Which endo trolley files get marked Low or Out most often. Each time a
+// section changes to Low or Out counts once (endo_low events).
+function endoRunOutRanking(history) {
+  const byId = {};
+  history
+    .filter((h) => h.action === "endo_low")
+    .forEach((h) => {
+      const e = (byId[h.sectionId] = byId[h.sectionId] || { id: h.sectionId, low: 0, out: 0, fallback: h.sectionName });
+      if (h.level === "out") e.out += 1;
+      else e.low += 1;
+    });
+  return Object.values(byId)
+    .map((e) => {
+      const label = endoSectionLabel(e.id);
+      return { name: label === e.id && e.fallback ? e.fallback : label, low: e.low, out: e.out, total: e.low + e.out };
+    })
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 12);
 }
 
 // Which rooms raise the most flags overall, regardless of item.
@@ -808,6 +868,7 @@ export default function DentalInventoryApp() {
   const [urgentAlerts, setUrgentAlerts] = useState(null); // [{id, room, message, staff, status, createdAt, resolvedBy, resolvedAt}]
   const [auditChecklist, setAuditChecklist] = useState(null); // [itemId, ...] -- shared base list, same for every treatment room
   const [roomCustomAuditItems, setRoomCustomAuditItems] = useState(null); // { [room]: [{id, text, status, updatedAt, updatedBy}] }
+  const [endoStatus, setEndoStatus] = useState({}); // { [sectionId]: { status, updatedAt, updatedBy } }
   const [roomSettings, setRoomSettings] = useState({}); // { [room]: { color, name } }
   const [roomAuditStatus, setRoomAuditStatus] = useState(null); // { [room]: { [checklistItemId]: {status, updatedAt, updatedBy} } }
   const [auditRoom, setAuditRoom] = useState(null); // which room's audit page is open right now
@@ -1006,6 +1067,19 @@ export default function DentalInventoryApp() {
       () => setSaveError("Couldn't reach the database -- check firebase.js is filled in.")
     );
 
+    const unsubEndo = onSnapshot(
+      query(collection(db, "endoTrolley")),
+      (snap) => {
+        const bySection = {};
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          bySection[data.id] = { status: data.status, updatedAt: data.updatedAt, updatedBy: data.updatedBy };
+        });
+        setEndoStatus(bySection);
+      },
+      () => {}
+    );
+
     const unsubRoomSettings = onSnapshot(
       query(collection(db, "roomSettings")),
       (snap) => {
@@ -1058,6 +1132,7 @@ export default function DentalInventoryApp() {
       unsubAuditChecklist();
       unsubRoomCustomAuditItems();
       unsubRoomSettings();
+      unsubEndo();
       unsubRoomAuditStatus();
     };
   }, []);
@@ -1283,6 +1358,42 @@ export default function DentalInventoryApp() {
     deleteDoc(doc(db, "roomCustomAuditItems", itemId)).catch(() =>
       setSaveError("Couldn't save -- check your connection.")
     );
+  }, []);
+
+  const endoStatusRef = useRef(endoStatus);
+  endoStatusRef.current = endoStatus;
+  const setEndoSectionStatus = useCallback(async (sectionId, status, staff) => {
+    const prev = (endoStatusRef.current[sectionId] || {}).status || "full";
+    if ((status === "low" || status === "out") && status !== prev) {
+      const evt = {
+        id: `h_${Date.now()}_${Math.round(Math.random() * 9999)}`,
+        itemId: null,
+        room: "Lab",
+        action: "endo_low",
+        sectionId,
+        sectionName: endoSectionLabel(sectionId),
+        level: status,
+        date: new Date().toISOString(),
+      };
+      setDoc(doc(collection(db, "flagHistoryEvents"), evt.id), evt).catch(() => {});
+    }
+    try {
+      await setDoc(doc(db, "endoTrolley", sectionId), {
+        id: sectionId,
+        status,
+        updatedAt: new Date().toISOString(),
+        updatedBy: staff || "",
+      });
+      return { ok: true };
+    } catch (e) {
+      const denied = e && e.code === "permission-denied";
+      setSaveError(
+        denied
+          ? "Endo trolley needs the updated Firestore rules -- publish firestore.rules in the Firebase console."
+          : "Couldn't save -- check your connection."
+      );
+      return { ok: false, denied };
+    }
   }, []);
 
   // A room's colour and/or display name (e.g. "Jess & Richard"). One
@@ -1605,6 +1716,42 @@ export default function DentalInventoryApp() {
     return results.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
   }, [roomAuditStatus, roomCustomAuditItems, auditChecklist]);
 
+  // Endo trolley sections marked Low or Out show up as low-stock flags in the
+  // Lab, so they flow into the dashboard, floor map and to-do list like any
+  // other low item. Restocking one just sets it back to Full.
+  const { endoFlags, endoItemsById } = useMemo(() => {
+    const flags = [];
+    const itemsMap = {};
+    ENDO_TROLLEY.forEach((tray) => {
+      tray.sections.forEach((name, idx) => {
+        const sid = endoSectionId(tray.id, idx);
+        const st = endoStatus[sid];
+        if (!st || (st.status !== "low" && st.status !== "out")) return;
+        const id = `${ENDO_PREFIX}${sid}`;
+        itemsMap[id] = {
+          id,
+          name: `Endo trolley · ${endoSectionLabel(sid)}`,
+          category: `Endo trolley · ${st.status === "out" ? "Out" : "Low"}`,
+        };
+        flags.push({ itemId: id, room: "Lab", flaggedAt: st.updatedAt, staff: st.updatedBy || "", note: "" });
+      });
+    });
+    return { endoFlags: flags, endoItemsById: itemsMap };
+  }, [endoStatus]);
+
+  const flagsWithEndo = useMemo(() => [...(activeFlags || []).filter((f) => !UNUSABLE_ROOMS.includes(f.room)), ...endoFlags], [activeFlags, endoFlags]);
+  const itemsByIdWithEndo = useMemo(() => ({ ...itemsById, ...endoItemsById }), [itemsById, endoItemsById]);
+
+  const toggleFlagOrEndo = useCallback(
+    (args) => {
+      if (args.itemId && args.itemId.startsWith(ENDO_PREFIX)) {
+        return setEndoSectionStatus(args.itemId.slice(ENDO_PREFIX.length), "full", args.staff);
+      }
+      return toggleFlag(args);
+    },
+    [toggleFlag, setEndoSectionStatus]
+  );
+
   // Blocked-out rooms are invisible everywhere except the floor map.
   const usableFlags = useMemo(
     () => (activeFlags || []).filter((f) => !UNUSABLE_ROOMS.includes(f.room)),
@@ -1645,7 +1792,7 @@ export default function DentalInventoryApp() {
       {view === "dashboard" && (
         <Dashboard
           items={items}
-          itemsById={itemsById}
+          itemsById={itemsByIdWithEndo}
           history={usableHistory}
           roomSettings={roomSettings}
           onSetRoomSetting={setRoomSetting}
@@ -1653,7 +1800,7 @@ export default function DentalInventoryApp() {
             setAuditRoom(room);
             setView("audit-room");
           }}
-          activeFlags={usableFlags}
+          activeFlags={flagsWithEndo}
           backorderedItems={backorderedItems}
           roomAudits={roomAudits}
           openOrders={openOrders}
@@ -1663,7 +1810,7 @@ export default function DentalInventoryApp() {
           myRoom={myRoom}
           myName={myName}
           setView={setView}
-          onToggle={toggleFlag}
+          onToggle={toggleFlagOrEndo}
           onSetItemStatus={setRoomAuditItemStatus}
           onSetCustomStatus={setCustomAuditItemStatus}
           onRebuildFlags={rebuildFlagsFromHistory}
@@ -1683,14 +1830,23 @@ export default function DentalInventoryApp() {
       )}
       {view === "rooms" && (
         <RoomsOverview
-          items={itemsById}
-          activeFlags={usableFlags}
+          items={itemsByIdWithEndo}
+          activeFlags={flagsWithEndo}
           missingAuditItems={missingAuditItems}
-          onToggle={toggleFlag}
+          onToggle={toggleFlagOrEndo}
           onOpenAudit={(room) => {
             setAuditRoom(room);
             setView("audit-room");
           }}
+        />
+      )}
+      {view === "endo-trolley" && (
+        <EndoTrolley
+          endoStatus={endoStatus}
+          myName={myName}
+          setMyName={setMyName}
+          onSetStatus={setEndoSectionStatus}
+          onBack={() => setView("dashboard")}
         />
       )}
       {view === "audit-room" && (
@@ -1996,6 +2152,7 @@ function RoomSheet({
   onToggle,
   onResolveMissing,
   onOpenAudit,
+  onOpenEndo,
   onClose,
 }) {
   const settings = (roomSettings && roomSettings[room]) || { color: "", name: "" };
@@ -2283,6 +2440,13 @@ function RoomSheet({
         </div>
 
 
+        {room === "Lab" && (
+          <div className="di-sheet-cta-wrap">
+            <button className="di-small-btn di-sheet-cta" onClick={onOpenEndo}>
+              <Package size={14} /> Endo trolley
+            </button>
+          </div>
+        )}
         {isTreatment && (
           <div className="di-sheet-cta-wrap">
             <button className="di-small-btn di-sheet-cta" onClick={() => onOpenAudit(room)}>
@@ -2482,6 +2646,10 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
           onOpenAudit={(r) => {
             setOpenRoom(null);
             onOpenAudit(r);
+          }}
+          onOpenEndo={() => {
+            setOpenRoom(null);
+            setView("endo-trolley");
           }}
           onClose={() => setOpenRoom(null)}
         />
@@ -3218,6 +3386,124 @@ function AuditSection({ section, sectionItems, roomStatus, onSetStatus, onRemove
 }
 
 
+/* ============================================================================
+   ENDO TROLLEY -- two trays of file-size sections, each Full / Low / Out
+============================================================================ */
+function EndoTrolley({ endoStatus, myName, setMyName, onSetStatus, onBack }) {
+  const [picking, setPicking] = useState(null); // { id, name, tray } | null
+  const [staff, setStaff] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (myName) setStaff(myName);
+  }, [myName]);
+
+  const statusOf = (sid) => (endoStatus[sid] && endoStatus[sid].status) || "full";
+
+  const choose = async (status) => {
+    setBusy(true);
+    if (staff && staff !== myName) setMyName(staff);
+    await onSetStatus(picking.id, status, staff);
+    setBusy(false);
+    setPicking(null);
+  };
+
+  const pickedInfo = picking ? endoStatus[picking.id] : null;
+
+  return (
+    <div className="di-page">
+      <button className="di-linklike di-back-link" onClick={onBack}>
+        &larr; Back to dashboard
+      </button>
+      <PageHeader
+        eyebrow="Lab"
+        title="Endo trolley"
+        sub="Tap a section to set it to Full, Low or Out. Low and Out go straight onto the dashboard's low stock."
+      />
+
+      <div className="di-panel">
+        <div className="di-field" style={{ maxWidth: 220 }}>
+          <label>Your name (optional)</label>
+          <input placeholder="e.g. Jess" value={staff} onChange={(e) => setStaff(e.target.value)} />
+        </div>
+      </div>
+
+      {ENDO_TROLLEY.map((tray) => (
+        <div className="di-panel" key={tray.id}>
+          <div className="di-panel-head">
+            <h3>{tray.name}</h3>
+          </div>
+          {tray.rowLabels.map((rowLabel, r) => (
+            <div key={`${tray.id}-row-${r}`} className="di-endo-row">
+              <div className="di-endo-rowlabel">{rowLabel}</div>
+              <div className="di-endo-tray">
+                {tray.sections.slice(r * 6, r * 6 + 6).map((name, j) => {
+                  const idx = r * 6 + j;
+                  const sid = endoSectionId(tray.id, idx);
+                  const st = statusOf(sid);
+                  return (
+                    <button
+                      key={sid}
+                      className={`di-endo-cell is-${st}`}
+                      onClick={() => setPicking({ id: sid, name, tray: `${tray.name} · ${rowLabel}` })}
+                    >
+                      <span className="di-endo-name">{name}</span>
+                      <span className="di-endo-status">{ENDO_STATUSES.find((x) => x.value === st).label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      ))}
+
+      <div className="di-legend">
+        {ENDO_STATUSES.map((x) => (
+          <span key={x.value}>
+            <i className="di-legend-dot" style={{ background: x.color }} /> {x.label}
+          </span>
+        ))}
+      </div>
+
+      {picking && (
+        <div className="di-sheet-backdrop" onClick={() => !busy && setPicking(null)}>
+          <div className="di-sheet" role="dialog" aria-label={picking.name} onClick={(e) => e.stopPropagation()}>
+            <div className="di-sheet-head">
+              <div>
+                <div className="di-sheet-eyebrow">{picking.tray}</div>
+                <h2 className="di-sheet-title">{picking.name}</h2>
+                {pickedInfo && pickedInfo.updatedAt && (
+                  <div className="di-cell-sub">
+                    Last set {timeAgo(pickedInfo.updatedAt)}
+                    {pickedInfo.updatedBy ? ` by ${pickedInfo.updatedBy}` : ""}
+                  </div>
+                )}
+              </div>
+              <button className="di-sheet-close" onClick={() => setPicking(null)} aria-label="Close">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="di-endo-choices">
+              {ENDO_STATUSES.map((x) => (
+                <button
+                  key={x.value}
+                  className={`di-endo-choice${statusOf(picking.id) === x.value ? " is-current" : ""}`}
+                  style={{ color: x.color, background: x.bg, borderColor: x.color }}
+                  disabled={busy}
+                  onClick={() => choose(x.value)}
+                >
+                  {x.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Trends({ items, history, setView }) {
   const [missingRoom, setMissingRoom] = useState("All rooms");
 
@@ -3230,6 +3516,7 @@ function Trends({ items, history, setView }) {
   const overconsumption = overconsumptionOutliers(items, history);
   const resolutionStats = computeResolutionStats(history);
   const weeklyTrend = weeklyFlagTrend(history);
+  const endoRanking = endoRunOutRanking(history);
 
   return (
     <div className="di-page">
@@ -3347,6 +3634,33 @@ function Trends({ items, history, setView }) {
                   contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid var(--line)" }}
                 />
                 <Bar dataKey="count" radius={[0, 4, 4, 0]} fill="var(--red)" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+
+      <div className="di-panel">
+        <div className="di-panel-head">
+          <h3>Endo files that run out most</h3>
+        </div>
+        <div className="di-hint-text">
+          Counts each time a file section on the endo trolley is set to Low or Out. Tracking started when this
+          feature went live.
+        </div>
+        {endoRanking.length === 0 ? (
+          <EmptyState icon={Info} text="No endo files marked low or out yet -- counts build up from here." />
+        ) : (
+          <div className="di-chart-wrap">
+            <ResponsiveContainer width="100%" height={Math.max(180, endoRanking.length * 34)}>
+              <BarChart data={endoRanking} layout="vertical" margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--line)" horizontal={false} />
+                <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11, fill: "var(--ink-soft)" }} />
+                <YAxis type="category" dataKey="name" width={150} tick={{ fontSize: 11, fill: "var(--ink)" }} />
+                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid var(--line)" }} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Bar dataKey="low" name="Low" stackId="endo" fill="var(--amber)" />
+                <Bar dataKey="out" name="Out" stackId="endo" fill="var(--red)" radius={[0, 4, 4, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -4393,4 +4707,20 @@ const CSS = `
 .di-swatch.is-active { box-shadow: 0 0 0 2px var(--ink); }
 .di-swatch.is-taken { opacity: .28; cursor: not-allowed; position: relative; }
 .di-swatch.is-taken::after { content: ""; position: absolute; left: 3px; right: 3px; top: 50%; height: 2px; background: var(--ink); transform: rotate(-45deg); }
+
+/* ---- endo trolley ---- */
+.di-endo-tray { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+@media (max-width: 520px) { .di-endo-tray { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.di-endo-row + .di-endo-row { margin-top: 14px; }
+.di-endo-rowlabel { font-size: 12px; font-weight: 700; letter-spacing: .04em; color: var(--ink-soft); margin-bottom: 6px; }
+.di-endo-cell { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 64px; padding: 6px 4px; border-radius: 12px; border: 2px solid transparent; font-family: inherit; cursor: pointer; transition: transform .12s ease; }
+.di-endo-cell:active { transform: scale(.96); }
+.di-endo-cell.is-full { background: var(--green-bg); color: var(--green); }
+.di-endo-cell.is-low { background: var(--amber-bg); color: var(--amber); border-color: var(--amber); }
+.di-endo-cell.is-out { background: var(--red-bg); color: var(--red); border-color: var(--red); }
+.di-endo-name { font-weight: 700; font-size: 13px; text-align: center; line-height: 1.15; word-break: break-word; }
+.di-endo-status { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; opacity: .85; }
+.di-endo-choices { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 8px; }
+.di-endo-choice { padding: 18px 8px; border-radius: 14px; border: 2px solid; font-family: inherit; font-weight: 700; font-size: 16px; cursor: pointer; opacity: .8; }
+.di-endo-choice.is-current { opacity: 1; box-shadow: 0 0 0 3px rgba(0,0,0,.15); }
 `;
