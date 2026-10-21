@@ -868,6 +868,7 @@ export default function DentalInventoryApp() {
   const [urgentAlerts, setUrgentAlerts] = useState(null); // [{id, room, message, staff, status, createdAt, resolvedBy, resolvedAt}]
   const [auditChecklist, setAuditChecklist] = useState(null); // [itemId, ...] -- shared base list, same for every treatment room
   const [roomCustomAuditItems, setRoomCustomAuditItems] = useState(null); // { [room]: [{id, text, status, updatedAt, updatedBy}] }
+  const [roomExclusions, setRoomExclusions] = useState({}); // { [room]: [checklistItemId, ...] } -- items this room doesn't have
   const [endoStatus, setEndoStatus] = useState({}); // { [sectionId]: { status, updatedAt, updatedBy } }
   const [roomSettings, setRoomSettings] = useState({}); // { [room]: { color, name } }
   const [roomAuditStatus, setRoomAuditStatus] = useState(null); // { [room]: { [checklistItemId]: {status, updatedAt, updatedBy} } }
@@ -1067,6 +1068,19 @@ export default function DentalInventoryApp() {
       () => setSaveError("Couldn't reach the database -- check firebase.js is filled in.")
     );
 
+    const unsubExclusions = onSnapshot(
+      query(collection(db, "roomAuditExclusions")),
+      (snap) => {
+        const byRoom = {};
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          byRoom[data.room] = Array.isArray(data.excluded) ? data.excluded : [];
+        });
+        setRoomExclusions(byRoom);
+      },
+      () => {}
+    );
+
     const unsubEndo = onSnapshot(
       query(collection(db, "endoTrolley")),
       (snap) => {
@@ -1133,6 +1147,7 @@ export default function DentalInventoryApp() {
       unsubRoomCustomAuditItems();
       unsubRoomSettings();
       unsubEndo();
+      unsubExclusions();
       unsubRoomAuditStatus();
     };
   }, []);
@@ -1362,6 +1377,37 @@ export default function DentalInventoryApp() {
 
   const endoStatusRef = useRef(endoStatus);
   endoStatusRef.current = endoStatus;
+  // Per-room audit list: items this room simply doesn't have by default.
+  // Excluded items disappear from that room's audit (and from "missing"), and
+  // any status already recorded for them in that room is cleared.
+  const saveRoomExclusions = useCallback(
+    async (room, excludedIds) => {
+      try {
+        await setDoc(doc(db, "roomAuditExclusions", room), {
+          room,
+          excluded: excludedIds,
+          updatedAt: new Date().toISOString(),
+        });
+        const before = new Set(roomExclusions[room] || []);
+        excludedIds
+          .filter((id) => !before.has(id))
+          .forEach((id) => {
+            deleteDoc(doc(db, "roomAuditStatus", `${room}::${id}`)).catch(() => {});
+          });
+        return { ok: true };
+      } catch (e) {
+        const denied = e && e.code === "permission-denied";
+        setSaveError(
+          denied
+            ? "Room audit lists need the updated Firestore rules -- publish firestore.rules in the Firebase console."
+            : "Couldn't save -- check your connection."
+        );
+        return { ok: false, denied };
+      }
+    },
+    [roomExclusions]
+  );
+
   const setEndoSectionStatus = useCallback(async (sectionId, status, staff) => {
     const prev = (endoStatusRef.current[sectionId] || {}).status || "full";
     if ((status === "low" || status === "out") && status !== prev) {
@@ -1682,7 +1728,9 @@ export default function DentalInventoryApp() {
     const results = [];
     Object.entries(roomAuditStatus).forEach(([room, statuses]) => {
       if (UNUSABLE_ROOMS.includes(room)) return;
+      const excludedHere = new Set(roomExclusions[room] || []);
       Object.entries(statuses || {}).forEach(([itemId, info]) => {
+        if (excludedHere.has(itemId)) return;
         // If this item no longer exists on the checklist (removed since
         // this status was set), there's nothing meaningful to show --
         // skip it rather than display a confusing "Unknown item."
@@ -1714,7 +1762,7 @@ export default function DentalInventoryApp() {
       });
     });
     return results.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-  }, [roomAuditStatus, roomCustomAuditItems, auditChecklist]);
+  }, [roomAuditStatus, roomCustomAuditItems, auditChecklist, roomExclusions]);
 
   // Endo trolley sections marked Low or Out show up as low-stock flags in the
   // Lab, so they flow into the dashboard, floor map and to-do list like any
@@ -1855,6 +1903,8 @@ export default function DentalInventoryApp() {
           auditChecklist={auditChecklist}
           roomStatus={roomAuditStatus[auditRoom] || {}}
           customItems={roomCustomAuditItems[auditRoom] || []}
+          roomExcluded={roomExclusions[auditRoom] || []}
+          onSaveExcluded={saveRoomExclusions}
           myRoom={myRoom}
           myName={myName}
           setMyName={setMyName}
@@ -3176,6 +3226,8 @@ function AuditRoom({
   auditChecklist,
   roomStatus,
   customItems,
+  roomExcluded = [],
+  onSaveExcluded,
   myRoom,
   myName,
   setMyName,
@@ -3189,6 +3241,10 @@ function AuditRoom({
 }) {
   const [staff, setStaff] = useState("");
   const [customText, setCustomText] = useState("");
+  const [editingList, setEditingList] = useState(false);
+  const [draftExcluded, setDraftExcluded] = useState([]);
+  const [listSaving, setListSaving] = useState(false);
+  const [listMsg, setListMsg] = useState("");
 
   useEffect(() => {
     if (myName) setStaff(myName);
@@ -3204,6 +3260,31 @@ function AuditRoom({
 
   const sections = Object.keys(auditChecklist);
   const allChecklistItems = sections.flatMap((s) => auditChecklist[s] || []);
+  const excludedSet = new Set(roomExcluded);
+  const activeChecklistItems = allChecklistItems.filter((i) => !excludedSet.has(i.id));
+
+  const startEditList = () => {
+    setDraftExcluded(roomExcluded.filter((id) => allChecklistItems.some((i) => i.id === id)));
+    setListMsg("");
+    setEditingList(true);
+  };
+  const toggleDraft = (id) =>
+    setDraftExcluded((d) => (d.includes(id) ? d.filter((x) => x !== id) : [...d, id]));
+  const saveList = async () => {
+    setListSaving(true);
+    setListMsg("");
+    const res = await onSaveExcluded(room, draftExcluded);
+    setListSaving(false);
+    if (res && res.ok === false) {
+      setListMsg(
+        res.denied
+          ? "Couldn't save: the Firestore rules need updating to include roomAuditExclusions (publish firestore.rules in the Firebase console)."
+          : "Couldn't save -- check your connection and try again."
+      );
+    } else {
+      setEditingList(false);
+    }
+  };
 
   const addCustom = () => {
     if (!customText.trim()) return;
@@ -3215,13 +3296,13 @@ function AuditRoom({
   // any item still unmarked is ticked "ok" here, so nobody has to tap every
   // single check. Items already crossed as missing stay missing.
   const finishAudit = () => {
-    allChecklistItems.forEach((i) => {
+    activeChecklistItems.forEach((i) => {
       if (!roomStatus[i.id]?.status) onSetItemStatus(room, i.id, "ok", staff);
     });
     customItems.forEach((c) => {
       if (!c.status) onSetCustomStatus(room, c.id, "ok", staff, c.text);
     });
-    const statuses = allChecklistItems.map((i) => roomStatus[i.id]?.status || "ok");
+    const statuses = activeChecklistItems.map((i) => roomStatus[i.id]?.status || "ok");
     const customStatuses = customItems.map((c) => c.status || "ok");
     const allStatuses = [...statuses, ...customStatuses];
     const reviewedCount = allStatuses.length;
@@ -3253,11 +3334,64 @@ function AuditRoom({
         </div>
       </div>
 
+      <div className="di-panel">
+        <div className="di-panel-head">
+          <h3>This room's list</h3>
+          {!editingList && (
+            <button className="di-small-btn di-small-btn-ghost" onClick={startEditList}>
+              <Pencil size={13} /> Edit list
+            </button>
+          )}
+        </div>
+        {!editingList ? (
+          <div className="di-hint-text">
+            {excludedSet.size === 0
+              ? `Every item is checked in ${room}. Use Edit list to remove anything this room doesn't have.`
+              : `${excludedSet.size} item${excludedSet.size === 1 ? " is" : "s are"} hidden for ${room} because it doesn't have ${
+                  excludedSet.size === 1 ? "it" : "them"
+                }.`}
+          </div>
+        ) : (
+          <>
+            <div className="di-hint-text">
+              Untick anything {room} doesn't have. This only changes {room} -- other rooms keep the full list.
+            </div>
+            {sections.map((section) => (
+              <div key={section} style={{ marginTop: 10 }}>
+                <ul className="di-edit-list">
+                  {(auditChecklist[section] || []).map((item) => (
+                    <li key={item.id}>
+                      <label className="di-edit-row">
+                        <input
+                          type="checkbox"
+                          checked={!draftExcluded.includes(item.id)}
+                          onChange={() => toggleDraft(item.id)}
+                        />
+                        <span>{item.name}</span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+            {listMsg && <div className="di-details-error" style={{ marginTop: 10 }}>{listMsg}</div>}
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <button className="di-small-btn" onClick={saveList} disabled={listSaving}>
+                {listSaving ? "Saving…" : "Save list"}
+              </button>
+              <button className="di-ghost-btn" onClick={() => setEditingList(false)} disabled={listSaving}>
+                Cancel
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
       {sections.map((section) => (
         <AuditSection
           key={section}
           section={section}
-          sectionItems={auditChecklist[section] || []}
+          sectionItems={(auditChecklist[section] || []).filter((i) => !excludedSet.has(i.id))}
           roomStatus={roomStatus}
           onSetStatus={(itemId, status) => onSetItemStatus(room, itemId, status, staff)}
           onRemove={(itemId) => onRemoveChecklistItem(section, itemId)}
@@ -3372,7 +3506,7 @@ function AuditSection({ section, sectionItems, roomStatus, onSetStatus, onRemove
                   >
                     <X size={16} />
                   </button>
-                  <button className="di-audit-btn-remove" onClick={() => onRemove(item.id)} title="Remove from checklist">
+                  <button className="di-audit-btn-remove" onClick={() => onRemove(item.id)} title="Remove from every room's checklist">
                     <Trash2 size={13} />
                   </button>
                 </div>
@@ -4711,6 +4845,9 @@ const CSS = `
 /* ---- endo trolley ---- */
 .di-endo-tray { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 @media (max-width: 520px) { .di-endo-tray { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.di-edit-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 12px; }
+.di-edit-row { display: flex; align-items: center; gap: 8px; padding: 7px 4px; font-size: 14px; cursor: pointer; }
+.di-edit-row input { width: 18px; height: 18px; }
 .di-endo-row + .di-endo-row { margin-top: 14px; }
 .di-endo-rowlabel { font-size: 12px; font-weight: 700; letter-spacing: .04em; color: var(--ink-soft); margin-bottom: 6px; }
 .di-endo-cell { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 64px; padding: 6px 4px; border-radius: 12px; border: 2px solid transparent; font-family: inherit; cursor: pointer; transition: transform .12s ease; }

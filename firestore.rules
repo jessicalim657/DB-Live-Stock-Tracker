@@ -43,5 +43,8 @@ service cloud.firestore {
     match /endoTrolley/{document} {
       allow read, write: if true;
     }
+    match /roomAuditExclusions/{document} {
+      allow read, write: if true;
+    }
   }
 }
