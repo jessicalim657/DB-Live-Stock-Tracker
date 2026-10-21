@@ -2186,6 +2186,90 @@ function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, 
   );
 }
 
+// A little tooth that dances across the bottom of the screen. Played
+// whenever something gets restocked or found. Skipped when the device is set
+// to reduce motion.
+function DancingTooth() {
+  const reduce =
+    typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduce) return null;
+  return (
+    <div className="di-dancer" aria-hidden="true">
+      <svg viewBox="0 0 24 34" width="52" height="74">
+        <rect className="di-leg di-leg-l" x="7.5" y="20" width="3" height="10" rx="1.5" fill="#8B6F4E" />
+        <rect className="di-leg di-leg-r" x="13.5" y="20" width="3" height="10" rx="1.5" fill="#8B6F4E" />
+        <path
+          d="M7.2 2.8c-2.3 0-4.2 1.8-4.2 4.6 0 2.1.8 3.4 1.4 5.2.6 1.9.6 4.9 1.7 7 .6 1.1 1.9 1.1 2.3-.1.4-1.1.6-3.1 1.3-3.9.4-.5 1-.5 1.4 0 .7.8.9 2.8 1.3 3.9.4 1.2 1.7 1.2 2.3.1 1.1-2.1 1.1-5.1 1.7-7 .6-1.8 1.4-3.1 1.4-5.2 0-2.8-1.9-4.6-4.2-4.6-1.5 0-2.4.7-3.8.7s-2.3-.7-3.8-.7z"
+          fill="#fff"
+          stroke="#18160F"
+          strokeWidth="1.1"
+          strokeLinejoin="round"
+        />
+        <circle cx="9.2" cy="8.6" r="1" fill="#18160F" />
+        <circle cx="14.8" cy="8.6" r="1" fill="#18160F" />
+        <path d="M9.4 11.6q2.6 2.6 5.2 0" fill="none" stroke="#18160F" strokeWidth="1" strokeLinecap="round" />
+        <circle cx="7.4" cy="10.6" r="1.1" fill="#F4A6B8" opacity=".7" />
+        <circle cx="16.6" cy="10.6" r="1.1" fill="#F4A6B8" opacity=".7" />
+      </svg>
+    </div>
+  );
+}
+
+// A one-off burst of confetti, used when a room is all good. Skipped for
+// people who've asked their device to reduce motion.
+function Confetti() {
+  const [done, setDone] = useState(false);
+  const pieces = useMemo(() => {
+    const colors = ROOM_COLORS.map((c) => c.hex);
+    return Array.from({ length: 46 }, (_, i) => {
+      const angle = (-80 + Math.random() * 160) * (Math.PI / 180); // fan upwards
+      const power = 120 + Math.random() * 190;
+      return {
+        id: i,
+        dx: Math.round(Math.sin(angle) * power),
+        up: Math.round(60 + Math.cos(angle) * power * 0.9),
+        fall: Math.round(180 + Math.random() * 220),
+        rot: Math.round(240 + Math.random() * 520),
+        delay: Math.round(Math.random() * 140),
+        size: 6 + Math.round(Math.random() * 6),
+        color: colors[i % colors.length],
+        round: i % 3 === 0,
+      };
+    });
+  }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDone(true), 2600);
+    return () => clearTimeout(t);
+  }, []);
+
+  const reduce =
+    typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (done || reduce) return null;
+
+  return (
+    <div className="di-confetti" aria-hidden="true">
+      {pieces.map((p) => (
+        <span
+          key={p.id}
+          className="di-confetti-piece"
+          style={{
+            background: p.color,
+            width: p.size,
+            height: p.round ? p.size : p.size * 1.6,
+            borderRadius: p.round ? "50%" : 2,
+            animationDelay: `${p.delay}ms`,
+            "--dx": `${p.dx}px`,
+            "--up": `${p.up}px`,
+            "--fall": `${p.fall}px`,
+            "--rot": `${p.rot}deg`,
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
 // Everything about one room, in a sheet that slides up over the dashboard.
 function RoomSheet({
   room,
@@ -2281,6 +2365,7 @@ function RoomSheet({
 
   return (
     <div className="di-sheet-backdrop" onClick={onClose}>
+      {allGood && <Confetti />}
       <div className="di-sheet" role="dialog" aria-label={room} onClick={(e) => e.stopPropagation()}>
         <div className="di-sheet-head">
           <div>
@@ -2289,8 +2374,8 @@ function RoomSheet({
             {settings.name && <div className="di-sheet-roomname">{settings.name}</div>}
             <div className="di-sheet-status">
               {allGood ? (
-                <span style={{ color: "var(--green)" }}>
-                  <CircleCheck size={14} /> All good right now
+                <span className="di-allgood">
+                  <CircleCheck size={20} /> All good!
                 </span>
               ) : (
                 <span style={{ color: "var(--red)" }}>
@@ -2648,7 +2733,9 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
   const [listOpen, setListOpen] = useState(false);
   const [cheerMsg, setCheerMsg] = useState(null);
   const [popRoom, setPopRoom] = useState(null);
+  const [toothRun, setToothRun] = useState(0); // bumps each time the dancing tooth should run
   const cheerTimer = useRef(null);
+  const toothTimer = useRef(null);
   const [confirmingRebuild, setConfirmingRebuild] = useState(false);
   const [rebuildResult, setRebuildResult] = useState(null); // null | { count: number }
 
@@ -2703,12 +2790,15 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
     const remaining = (flagsByRoom[room] || 0) + (missingByRoom[room] || 0) - 1;
     const roomDone = remaining <= 0 && !alertRooms.has(room);
     setCheerMsg(roomDone ? `${room} is all sorted 🎉` : "Nice one ✓");
+    setToothRun((n) => n + 1);
     if (roomDone) setPopRoom(room);
     if (cheerTimer.current) clearTimeout(cheerTimer.current);
     cheerTimer.current = setTimeout(() => {
       setCheerMsg(null);
       setPopRoom(null);
     }, 2400);
+    if (toothTimer.current) clearTimeout(toothTimer.current);
+    toothTimer.current = setTimeout(() => setToothRun(0), 3000);
   };
   const toggleWithCheer = (args) => {
     cheer(args.room);
@@ -2919,6 +3009,7 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
 
 
       {cheerMsg && <div className="di-cheer" role="status">{cheerMsg}</div>}
+      {toothRun > 0 && <DancingTooth key={toothRun} />}
     </div>
   );
 }
@@ -4919,6 +5010,25 @@ const CSS = `
 .di-audits-collapse-btn { background: #fff; border: 1px solid var(--line) !important; border-radius: 999px; padding: 5px 10px !important; box-shadow: 0 1px 2px rgba(60,45,20,.05); }
 .di-audits-collapse-btn:hover { border-color: var(--sand) !important; }
 @keyframes di-menu-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+/* ---- all good + confetti ---- */
+.di-allgood { display: inline-flex; align-items: center; gap: 8px; background: var(--green); color: #fff; font-size: 16px; font-weight: 800; letter-spacing: .01em; padding: 8px 16px 8px 12px; border-radius: 999px; box-shadow: 0 6px 16px rgba(107,138,102,.4); animation: di-allgood-in .5s cubic-bezier(.2,1.4,.4,1) both; }
+@keyframes di-allgood-in { from { opacity: 0; transform: scale(.7); } to { opacity: 1; transform: none; } }
+.di-confetti { position: fixed; left: 50%; top: 38%; width: 0; height: 0; z-index: 80; pointer-events: none; }
+.di-confetti-piece { position: absolute; left: 0; top: 0; opacity: 0; animation: di-confetti 1.9s cubic-bezier(.2,.7,.3,1) forwards; }
+@keyframes di-confetti {
+  0% { opacity: 1; transform: translate(0, 0) rotate(0) scale(.4); }
+  35% { opacity: 1; transform: translate(var(--dx), calc(var(--up) * -1)) rotate(calc(var(--rot) * .5)) scale(1); }
+  100% { opacity: 0; transform: translate(calc(var(--dx) * 1.2), var(--fall)) rotate(var(--rot)) scale(.9); }
+}
+/* ---- dancing tooth ---- */
+.di-dancer { position: fixed; bottom: 76px; left: 0; z-index: 75; pointer-events: none; animation: di-run 2.8s linear forwards; }
+.di-dancer svg { display: block; overflow: visible; transform-origin: 50% 100%; animation: di-dance .4s ease-in-out infinite alternate; filter: drop-shadow(0 4px 6px rgba(0,0,0,.18)); }
+.di-leg { transform-box: fill-box; transform-origin: 50% 0; }
+.di-leg-l { animation: di-step .4s ease-in-out infinite alternate; }
+.di-leg-r { animation: di-step .4s ease-in-out infinite alternate-reverse; }
+@keyframes di-run { from { transform: translateX(-80px); } to { transform: translateX(calc(100vw + 30px)); } }
+@keyframes di-dance { from { transform: translateY(0) rotate(-10deg); } to { transform: translateY(-16px) rotate(10deg); } }
+@keyframes di-step { from { transform: rotate(-24deg); } to { transform: rotate(24deg); } }
 .di-edit-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 12px; }
 .di-edit-row { display: flex; align-items: center; gap: 8px; padding: 7px 4px; font-size: 14px; cursor: pointer; }
 .di-edit-row input { width: 18px; height: 18px; }
