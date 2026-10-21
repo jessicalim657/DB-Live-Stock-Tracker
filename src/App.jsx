@@ -314,7 +314,7 @@ const ROOM_COLORS = [
 ];
 const NO_COLOR_HEX = "#9A968C";
 
-// The endo trolley in the Lab: two trays, each a 6 x 2 grid of file-size
+// The endo trolley in Sterilisation: two trays, each a 6 x 2 grid of file-size
 // sections. Section ids come from tray + position, so renaming a section
 // later never loses its saved status. Replace the placeholder names below
 // with the real file sizes, left to right, top row first.
@@ -1414,7 +1414,7 @@ export default function DentalInventoryApp() {
       const evt = {
         id: `h_${Date.now()}_${Math.round(Math.random() * 9999)}`,
         itemId: null,
-        room: "Lab",
+        room: "Sterilisation",
         action: "endo_low",
         sectionId,
         sectionName: endoSectionLabel(sectionId),
@@ -1764,8 +1764,8 @@ export default function DentalInventoryApp() {
     return results.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
   }, [roomAuditStatus, roomCustomAuditItems, auditChecklist, roomExclusions]);
 
-  // Endo trolley sections marked Low or Out show up as low-stock flags in the
-  // Lab, so they flow into the dashboard, floor map and to-do list like any
+  // Endo trolley sections marked Low or Out show up as low-stock flags in
+  // Sterilisation, so they flow into the dashboard, floor map and to-do list like any
   // other low item. Restocking one just sets it back to Full.
   const { endoFlags, endoItemsById } = useMemo(() => {
     const flags = [];
@@ -1781,7 +1781,7 @@ export default function DentalInventoryApp() {
           name: `Endo trolley · ${endoSectionLabel(sid)}`,
           category: `Endo trolley · ${st.status === "out" ? "Out" : "Low"}`,
         };
-        flags.push({ itemId: id, room: "Lab", flaggedAt: st.updatedAt, staff: st.updatedBy || "", note: "" });
+        flags.push({ itemId: id, room: "Sterilisation", flaggedAt: st.updatedAt, staff: st.updatedBy || "", note: "" });
       });
     });
     return { endoFlags: flags, endoItemsById: itemsMap };
@@ -2096,7 +2096,7 @@ const colorHexFor = (roomSettings, room) => {
 
 // One tile per room, coloured by what's going on in it right now. Tapping a
 // tile opens that room's full picture (RoomSheet below).
-function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, roomSettings, onOpenRoom }) {
+function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, roomSettings, popRoom, onOpenRoom }) {
   const auditByRoom = {};
   roomAudits.forEach(({ room, audit }) => (auditByRoom[room] = audit));
 
@@ -2116,7 +2116,7 @@ function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, 
     return (
       <button
         key={room}
-        className={`di-tile is-${st} is-${variant}${myRoom === room ? " is-mine" : ""}`}
+        className={`di-tile is-${st} is-${variant}${myRoom === room ? " is-mine" : ""}${popRoom === room ? " is-pop" : ""}`}
         style={area}
         onClick={() => onOpenRoom(room)}
         aria-label={`${room}: ${st === "ok" ? "all good" : st}`}
@@ -2490,7 +2490,7 @@ function RoomSheet({
         </div>
 
 
-        {room === "Lab" && (
+        {room === "Sterilisation" && (
           <div className="di-sheet-cta-wrap">
             <button className="di-small-btn di-sheet-cta" onClick={onOpenEndo}>
               <Package size={14} /> Endo trolley
@@ -2590,11 +2590,11 @@ function LostAndFound({ missingAuditItems, roomSettings, onResolveMissing }) {
 function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, roomAudits, openOrders, missingAuditItems, openAlerts, roomsAffected, myRoom, myName, setView, onToggle, onSetItemStatus, onSetCustomStatus, onRebuildFlags, onOpenAudit, roomSettings, onSetRoomSetting }) {
   const [openRoom, setOpenRoom] = useState(null);
   const [listOpen, setListOpen] = useState(false);
+  const [cheerMsg, setCheerMsg] = useState(null);
+  const [popRoom, setPopRoom] = useState(null);
+  const cheerTimer = useRef(null);
   const [confirmingRebuild, setConfirmingRebuild] = useState(false);
   const [rebuildResult, setRebuildResult] = useState(null); // null | { count: number }
-  const [auditsOpen, setAuditsOpen] = useState(false);
-
-  const todoSections = buildDashboardTodos({ openAlerts, missingAuditItems, activeFlags, itemsById, roomAudits, setView });
 
   const sorted = [...activeFlags].sort((a, b) => new Date(a.flaggedAt) - new Date(b.flaggedAt));
 
@@ -2618,15 +2618,17 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
   const combinedTotal = sorted.length + missingAuditItems.length;
   const listTotal = sorted.length;
 
-  const neverAuditedCount = roomAudits.filter((r) => !r.audit).length;
-
   const resolveMissing = (m) => {
+    cheer(m.room);
     if (m.type === "checklist") {
       onSetItemStatus(m.room, m.itemId, "ok", myName || "");
     } else {
       onSetCustomStatus(m.room, m.itemId, "ok", myName || "");
     }
   };
+
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
 
   const flagsByRoom = {};
   sorted.forEach((f) => {
@@ -2638,12 +2640,36 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
   });
   const alertRooms = new Set(openAlerts.map((a) => a.room));
 
+  // A quiet little thank-you whenever something gets restocked or found. If
+  // that was the last thing outstanding in the room, the tile does a small
+  // happy pop and the message says so.
+  const cheer = (room) => {
+    const remaining = (flagsByRoom[room] || 0) + (missingByRoom[room] || 0) - 1;
+    const roomDone = remaining <= 0 && !alertRooms.has(room);
+    setCheerMsg(roomDone ? `${room} is all sorted 🎉` : "Nice one ✓");
+    if (roomDone) setPopRoom(room);
+    if (cheerTimer.current) clearTimeout(cheerTimer.current);
+    cheerTimer.current = setTimeout(() => {
+      setCheerMsg(null);
+      setPopRoom(null);
+    }, 2400);
+  };
+  const toggleWithCheer = (args) => {
+    cheer(args.room);
+    return onToggle(args);
+  };
+  const allClear = combinedTotal === 0 && openAlerts.length === 0;
+
   return (
     <div className="di-page">
       <PageHeader
-        eyebrow="Right now"
-        title="What's flagged low"
-        sub="Rooms flag items by hand -- restock and mark items resolved right here, no need to go elsewhere."
+        eyebrow={new Date().toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long" })}
+        title={`${greeting}${myName ? `, ${myName}` : ""}`}
+        sub={
+          combinedTotal === 0
+            ? "Everything's stocked and in its place. Enjoy the calm ✨"
+            : `${combinedTotal} thing${combinedTotal === 1 ? "" : "s"} could use a little love today.`
+        }
       />
 
       {!myRoom && (
@@ -2657,14 +2683,12 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
         </div>
       )}
 
-      <div className="di-stats">
-        <StatCard
-          label="Needs attention"
-          value={combinedTotal}
-          tone={combinedTotal > 0 ? "critical" : "default"}
-        />
-        <StatCard label="Open orders" value={openOrders.length} tone={openOrders.length > 0 ? "watch" : "default"} />
-      </div>
+      {allClear && (
+        <div className="di-celebrate">
+          <span className="di-celebrate-emoji">🎉</span>
+          <span>All {TREATMENT_ROOMS.length} rooms are good. Nothing's low, nothing's missing.</span>
+        </div>
+      )}
 
       <FloorMap
         flagsByRoom={flagsByRoom}
@@ -2673,6 +2697,7 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
         roomAudits={roomAudits}
         myRoom={myRoom}
         roomSettings={roomSettings}
+        popRoom={popRoom}
         onOpenRoom={setOpenRoom}
       />
 
@@ -2691,7 +2716,7 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
           myName={myName}
           roomSettings={roomSettings}
           onSetRoomSetting={onSetRoomSetting}
-          onToggle={onToggle}
+          onToggle={toggleWithCheer}
           onResolveMissing={resolveMissing}
           onOpenAudit={(r) => {
             setOpenRoom(null);
@@ -2759,7 +2784,7 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
                     <button
                       className="di-small-btn di-small-btn-ghost"
                       style={{ marginLeft: 8 }}
-                      onClick={() => onToggle({ itemId: entry.item.id, room, staff: myName || "" })}
+                      onClick={() => toggleWithCheer({ itemId: entry.item.id, room, staff: myName || "" })}
                     >
                       <Undo2 size={13} /> Restock
                     </button>
@@ -2787,44 +2812,6 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
               )}
             </RoomGroup>
           ))
-        )}
-      </div>
-
-      <div className="di-panel">
-        <div className="di-panel-head">
-          <h3>Audits</h3>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <button className="di-ghost-btn" onClick={() => setView("rooms")}>
-              <ClipboardList size={13} /> Go to audits
-            </button>
-            <button className="di-audits-collapse-btn" onClick={() => setAuditsOpen(!auditsOpen)}>
-              {!auditsOpen && neverAuditedCount > 0 && (
-                <span className="di-panel-count">{neverAuditedCount} never audited</span>
-              )}
-              {auditsOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-            </button>
-          </div>
-        </div>
-        {auditsOpen && (
-          <ul className="di-alert-list">
-            {roomAudits.map(({ room, audit }) => (
-              <li key={room} className="di-alert-row">
-                <span className="di-status-dot" style={{ background: audit ? "var(--green)" : "var(--amber)" }} />
-                <div className="di-alert-main">
-                  <div className="di-alert-name">{room}</div>
-                  {audit && (
-                    <div className="di-alert-meta">
-                      {audit.reviewedCount} reviewed{audit.flaggedCount > 0 ? ` · ${audit.flaggedCount} flagged` : ""}
-                    </div>
-                  )}
-                </div>
-                <div className="di-alert-figures">
-                  <div className="di-alert-stock">{audit ? timeAgo(audit.date) : "Not yet audited"}</div>
-                  {audit && audit.staff && <div className="di-alert-days">by {audit.staff}</div>}
-                </div>
-              </li>
-            ))}
-          </ul>
         )}
       </div>
 
@@ -2874,7 +2861,8 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
         )}
       </div>
 
-      <DashboardTodoWidget sections={todoSections} />
+
+      {cheerMsg && <div className="di-cheer" role="status">{cheerMsg}</div>}
     </div>
   );
 }
@@ -3550,7 +3538,7 @@ function EndoTrolley({ endoStatus, myName, setMyName, onSetStatus, onBack }) {
         &larr; Back to dashboard
       </button>
       <PageHeader
-        eyebrow="Lab"
+        eyebrow="Sterilisation"
         title="Endo trolley"
         sub="Tap a section to set it to Full, Low or Out. Low and Out go straight onto the dashboard's low stock."
       />
@@ -4382,22 +4370,22 @@ function Feedback({ feedback, onSubmit, onReview, myName, setMyName }) {
 ============================================================================ */
 const CSS = `
 :root {
-  --paper: #F1ECE1;
+  --paper: #F7F4EE;
   --panel: #FFFFFF;
   --ink: #18160F;
   --ink-soft: #7A7364;
-  --line: #DED5C1;
+  --line: #E8E1D2;
   --sand: #CDBFA5;
   --sand-dark: #B7A582;
   --clay: #8B6F4E;
   --charcoal: #17160F;
   --charcoal-2: #24221A;
-  --red: #A24B36;
-  --red-bg: #F0DDD3;
-  --amber: #A17B34;
-  --amber-bg: #F1E5C9;
-  --green: #62705A;
-  --green-bg: #E4E5D9;
+  --red: #C0674F;
+  --red-bg: #F9E8E1;
+  --amber: #B58A3C;
+  --amber-bg: #F9EFD6;
+  --green: #6B8A66;
+  --green-bg: #E8F1E3;
 }
 .di-root {
   display: flex;
@@ -4564,8 +4552,9 @@ const CSS = `
 .di-stat-critical .di-stat-value { color: var(--red); }
 .di-stat-watch .di-stat-value { color: var(--amber); }
 .di-panel {
-  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-  padding: 18px 20px; margin-bottom: 18px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 18px;
+  padding: 20px 22px; margin-bottom: 20px;
+  box-shadow: 0 1px 2px rgba(60,45,20,.04), 0 8px 24px rgba(60,45,20,.04);
 }
 .di-room-panel { display: flex; gap: 22px; flex-wrap: wrap; align-items: flex-end; }
 .di-panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
@@ -4845,6 +4834,17 @@ const CSS = `
 /* ---- endo trolley ---- */
 .di-endo-tray { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 @media (max-width: 520px) { .di-endo-tray { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+/* ---- softer look, celebrations, cheer ---- */
+.di-tile { border-radius: 16px; }
+.di-celebrate { display: flex; align-items: center; gap: 10px; background: var(--green-bg); color: var(--green); border-radius: 16px; padding: 12px 16px; margin-bottom: 20px; font-size: 14px; font-weight: 600; animation: di-rise .5s ease both; }
+.di-celebrate-emoji { font-size: 20px; display: inline-block; animation: di-wiggle 2.4s ease-in-out infinite; }
+.di-tile.is-pop { animation: di-pop .9s ease; }
+.di-cheer { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 10px 18px; border-radius: 999px; font-size: 14px; font-weight: 600; box-shadow: 0 8px 24px rgba(0,0,0,.2); z-index: 70; animation: di-cheer-in .3s ease both, di-cheer-out .4s ease 2s both; pointer-events: none; }
+@keyframes di-pop { 0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(107,138,102,.5); } 35% { transform: scale(1.14); box-shadow: 0 0 0 10px rgba(107,138,102,0); } 100% { transform: scale(1); } }
+@keyframes di-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes di-wiggle { 0%, 100% { transform: rotate(0); } 50% { transform: rotate(-10deg) scale(1.08); } }
+@keyframes di-cheer-in { from { opacity: 0; transform: translate(-50%, 12px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@keyframes di-cheer-out { from { opacity: 1; } to { opacity: 0; } }
 .di-edit-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 12px; }
 .di-edit-row { display: flex; align-items: center; gap: 8px; padding: 7px 4px; font-size: 14px; cursor: pointer; }
 .di-edit-row input { width: 18px; height: 18px; }
