@@ -2511,6 +2511,64 @@ function RoomSheet({
 
 // Missing room items as sticky notes. Tapping "Found it" plays a short
 // pop-away animation, then marks the item as back in the room.
+// A softer dropdown that matches the app's look (the browser's built-in
+// select list can't be styled). Closes on outside click or Escape.
+function SoftSelect({ value, options, onChange, ariaLabel }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    };
+    const onKey = (e) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="di-softselect" ref={ref}>
+      <button
+        type="button"
+        className={`di-softselect-btn${open ? " is-open" : ""}`}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={ariaLabel}
+        onClick={() => setOpen(!open)}
+      >
+        <span className="di-softselect-value">{value}</span>
+        <ChevronDown size={14} className="di-softselect-chev" />
+      </button>
+      {open && (
+        <ul className="di-softselect-menu" role="listbox">
+          {options.map((o) => (
+            <li key={o}>
+              <button
+                type="button"
+                role="option"
+                aria-selected={o === value}
+                className={`di-softselect-opt${o === value ? " is-selected" : ""}`}
+                onClick={() => {
+                  onChange(o);
+                  setOpen(false);
+                }}
+              >
+                <span>{o}</span>
+                {o === value && <CircleCheck size={14} />}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function LostAndFound({ missingAuditItems, roomSettings, onResolveMissing }) {
   const [leaving, setLeaving] = useState({});
   const [filterName, setFilterName] = useState("All instruments");
@@ -2538,14 +2596,12 @@ function LostAndFound({ missingAuditItems, roomSettings, onResolveMissing }) {
         <h3>Lost &amp; found</h3>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {names.length > 1 && (
-            <select value={activeFilter} onChange={(e) => setFilterName(e.target.value)} aria-label="Filter by instrument">
-              <option value="All instruments">All instruments</option>
-              {names.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
+            <SoftSelect
+              value={activeFilter}
+              options={["All instruments", ...names]}
+              onChange={setFilterName}
+              ariaLabel="Filter by instrument"
+            />
           )}
           <span className="di-panel-count">{shown.length}</span>
         </div>
@@ -4845,6 +4901,24 @@ const CSS = `
 @keyframes di-wiggle { 0%, 100% { transform: rotate(0); } 50% { transform: rotate(-10deg) scale(1.08); } }
 @keyframes di-cheer-in { from { opacity: 0; transform: translate(-50%, 12px); } to { opacity: 1; transform: translate(-50%, 0); } }
 @keyframes di-cheer-out { from { opacity: 1; } to { opacity: 0; } }
+/* ---- soft dropdowns ---- */
+.di-softselect { position: relative; }
+.di-softselect-btn { display: inline-flex; align-items: center; gap: 8px; max-width: 220px; background: #fff; border: 1px solid var(--line); border-radius: 999px; padding: 7px 12px 7px 14px; font-family: inherit; font-size: 13px; font-weight: 500; color: var(--ink); cursor: pointer; box-shadow: 0 1px 2px rgba(60,45,20,.05); transition: border-color .15s ease, box-shadow .15s ease; }
+.di-softselect-btn:hover { border-color: var(--sand); }
+.di-softselect-btn.is-open { border-color: var(--sand-dark); box-shadow: 0 0 0 3px rgba(183,165,130,.22); }
+.di-softselect-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.di-softselect-chev { color: var(--ink-soft); flex-shrink: 0; transition: transform .18s ease; }
+.di-softselect-btn.is-open .di-softselect-chev { transform: rotate(180deg); }
+.di-softselect-menu { position: absolute; right: 0; top: calc(100% + 8px); min-width: 190px; max-width: 280px; max-height: 280px; overflow-y: auto; margin: 0; padding: 6px; list-style: none; background: #fff; border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 12px 32px rgba(60,45,20,.14); z-index: 40; animation: di-menu-in .14s ease both; }
+.di-softselect-opt { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; background: none; border: none; border-radius: 10px; padding: 9px 10px; font-family: inherit; font-size: 13.5px; color: var(--ink); text-align: left; cursor: pointer; }
+.di-softselect-opt:hover { background: var(--paper); }
+.di-softselect-opt.is-selected { background: var(--green-bg); color: var(--green); font-weight: 600; }
+.di-panel-head select { appearance: none; -webkit-appearance: none; background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237A7364' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 12px center; border: 1px solid var(--line); border-radius: 999px; padding: 7px 32px 7px 14px; font-family: inherit; font-size: 13px; font-weight: 500; color: var(--ink); cursor: pointer; box-shadow: 0 1px 2px rgba(60,45,20,.05); }
+.di-panel-head select:hover { border-color: var(--sand); }
+.di-panel-head select:focus { outline: none; border-color: var(--sand-dark); box-shadow: 0 0 0 3px rgba(183,165,130,.22); }
+.di-audits-collapse-btn { background: #fff; border: 1px solid var(--line) !important; border-radius: 999px; padding: 5px 10px !important; box-shadow: 0 1px 2px rgba(60,45,20,.05); }
+.di-audits-collapse-btn:hover { border-color: var(--sand) !important; }
+@keyframes di-menu-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 .di-edit-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 12px; }
 .di-edit-row { display: flex; align-items: center; gap: 8px; padding: 7px 4px; font-size: 14px; cursor: pointer; }
 .di-edit-row input { width: 18px; height: 18px; }
