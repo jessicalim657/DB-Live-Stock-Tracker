@@ -2033,12 +2033,18 @@ function Shell({ view, setView, saveError, openAlerts, onResolveAlert, myName, c
         </nav>
         <div className="di-rail-footer">One tap when something's low. That's the whole job.</div>
       </aside>
-      <main className="di-main">
+      <main className={`di-main${isHalloween() ? " hw-on" : ""}`}>
         {saveError && (
           <div className="di-save-error">
             <AlertTriangle size={14} /> {saveError}
           </div>
         )}
+        {isHalloween() && (
+          <div className="di-hw-wrap">
+            <HalloweenDecor />
+          </div>
+        )}
+        {isHalloween() && <HalloweenExtras />}
         {children}
       </main>
     </div>
@@ -2096,7 +2102,7 @@ const colorHexFor = (roomSettings, room) => {
 
 // One tile per room, coloured by what's going on in it right now. Tapping a
 // tile opens that room's full picture (RoomSheet below).
-function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, roomSettings, popRoom, onOpenRoom }) {
+function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, roomSettings, popRoom, halloween, onOpenRoom }) {
   const auditByRoom = {};
   roomAudits.forEach(({ room, audit }) => (auditByRoom[room] = audit));
 
@@ -2137,6 +2143,12 @@ function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, 
           {missing > 0 && <span className="di-tile-badge di-tile-badge-missing">{missing}</span>}
           {st === "ok" && variant !== "room" && <CircleCheck size={16} className="di-tile-ok" />}
         </span>
+        {variant === "steri" && halloween && <Cauldron />}
+        {halloween && (st === "flag" || st === "urgent") && (
+          <span className="di-tile-web">
+            <Cobweb size={variant === "room" ? 30 : 48} />
+          </span>
+        )}
         {myRoom === room && <span className="di-tile-here">you're here</span>}
       </button>
     );
@@ -2155,7 +2167,13 @@ function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, 
   for (let i = 12; i <= 18; i++) uPlacements[i] = { gridColumn: 6, gridRow: `${(18 - i) * 5 + 1} / span 5` };
 
   return (
-    <div className="di-panel">
+    <div className={`di-panel${halloween ? " has-hw" : ""}`}>
+      {halloween && (
+        <>
+          <div className="di-hw-web"><Cobweb size={84} /></div>
+          <div className="di-hw-peek"><Pumpkin size={46} /></div>
+        </>
+      )}
       <div className="di-panel-head">
         <h3>Clinic floor</h3>
         <span className="di-hint-inline">Tap a room</span>
@@ -2195,7 +2213,7 @@ function DancingTooth() {
   if (reduce) return null;
   return (
     <div className="di-dancer" aria-hidden="true">
-      <svg viewBox="0 0 24 34" width="52" height="74">
+      <svg viewBox="0 -12 24 46" width="52" height="96">
         <rect className="di-leg di-leg-l" x="7.5" y="20" width="3" height="10" rx="1.5" fill="#8B6F4E" />
         <rect className="di-leg di-leg-r" x="13.5" y="20" width="3" height="10" rx="1.5" fill="#8B6F4E" />
         <path
@@ -2210,6 +2228,13 @@ function DancingTooth() {
         <path d="M9.4 11.6q2.6 2.6 5.2 0" fill="none" stroke="#18160F" strokeWidth="1" strokeLinecap="round" />
         <circle cx="7.4" cy="10.6" r="1.1" fill="#F4A6B8" opacity=".7" />
         <circle cx="16.6" cy="10.6" r="1.1" fill="#F4A6B8" opacity=".7" />
+        {isHalloween() && (
+          <g>
+            <polygon points="6,3.4 18,3.4 13.5,-9 11,-9.4" fill="#2A2420" />
+            <ellipse cx="12" cy="3.4" rx="9" ry="1.9" fill="#2A2420" />
+            <rect x="7.4" y="0" width="9.2" height="1.8" fill="#F28C28" />
+          </g>
+        )}
       </svg>
     </div>
   );
@@ -2220,7 +2245,7 @@ function DancingTooth() {
 function Confetti() {
   const [done, setDone] = useState(false);
   const pieces = useMemo(() => {
-    const colors = ROOM_COLORS.map((c) => c.hex);
+    const colors = isHalloween() ? ["#F28C28", "#7B4BB5", "#2A2420", "#9BC53D", "#F5A04A"] : ROOM_COLORS.map((c) => c.hex);
     return Array.from({ length: 46 }, (_, i) => {
       const angle = (-80 + Math.random() * 160) * (Math.PI / 180); // fan upwards
       const power = 120 + Math.random() * 190;
@@ -2367,6 +2392,11 @@ function RoomSheet({
     <div className="di-sheet-backdrop" onClick={onClose}>
       {allGood && <Confetti />}
       <div className="di-sheet" role="dialog" aria-label={room} onClick={(e) => e.stopPropagation()}>
+        {isHalloween() && !allGood && (
+          <span className="di-sheet-web">
+            <Cobweb size={110} />
+          </span>
+        )}
         <div className="di-sheet-head">
           <div>
             <div className="di-sheet-eyebrow">{isTreatment ? "Treatment room" : "Shared space"}</div>
@@ -2728,6 +2758,194 @@ function LostAndFound({ missingAuditItems, roomSettings, onResolveMissing }) {
   );
 }
 
+/* ============================================================================
+   HALLOWEEN (temporary) -- bunting, streamers, pumpkins, bats and a spider.
+   Switches itself on from 15 Oct to 1 Nov each year. To force it on or off,
+   set HALLOWEEN_FORCE below to true or false (null = automatic).
+============================================================================ */
+const HALLOWEEN_FORCE = null;
+function isHalloween() {
+  if (HALLOWEEN_FORCE !== null) return HALLOWEEN_FORCE;
+  const d = new Date();
+  const m = d.getMonth(); // 0 = Jan
+  const day = d.getDate();
+  return (m === 9 && day >= 15) || (m === 10 && day <= 1);
+}
+
+// Two small jack-o'-lanterns as an image, used beside every page heading.
+const HW_PUMPKIN_PAIR = `url("data:image/svg+xml,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 118 58" width="118" height="58"><g transform="translate(0 0) rotate(-6 32 30)"><ellipse cx="18" cy="36" rx="15" ry="19" fill="#E8741A"/><ellipse cx="46" cy="36" rx="15" ry="19" fill="#E8741A"/><ellipse cx="32" cy="36" rx="14" ry="20" fill="#F59A3A"/><path d="M32 18c-1 6-1 24 0 36" stroke="#C85F0F" stroke-width="1.2" fill="none" opacity=".5"/><path d="M29 18c0-5 1-8 3-10 1 2 2 3 4 3-1 3-1 5-1 7z" fill="#5B7F2B"/><path d="M36 11c3-1 5 0 6 2" stroke="#5B7F2B" stroke-width="1.6" fill="none" stroke-linecap="round"/><g fill="#2B1B0E"><polygon points="20,32 27,32 23.5,25"/><polygon points="37,32 44,32 40.5,25"/><path d="M20 40l4 4 4-4 4 4 4-4 4 4 4-4-1 8q-11 5-22 0z"/></g></g><g transform="translate(70 18) scale(.62) rotate(8 32 30)"><ellipse cx="18" cy="36" rx="15" ry="19" fill="#E8741A"/><ellipse cx="46" cy="36" rx="15" ry="19" fill="#E8741A"/><ellipse cx="32" cy="36" rx="14" ry="20" fill="#F59A3A"/><path d="M32 18c-1 6-1 24 0 36" stroke="#C85F0F" stroke-width="1.2" fill="none" opacity=".5"/><path d="M29 18c0-5 1-8 3-10 1 2 2 3 4 3-1 3-1 5-1 7z" fill="#5B7F2B"/><path d="M36 11c3-1 5 0 6 2" stroke="#5B7F2B" stroke-width="1.6" fill="none" stroke-linecap="round"/><g fill="#2B1B0E"><polygon points="20,32 27,32 23.5,25"/><polygon points="37,32 44,32 40.5,25"/><path d="M20 40l4 4 4-4 4 4 4-4 4 4 4-4-1 8q-11 5-22 0z"/></g></g></svg>'
+)}")`;
+
+const HW_COLORS = ["#F28C28", "#7B4BB5", "#2A2420", "#9BC53D"];
+
+// One swag of bunting as a repeating background tile, so it stretches to any
+// screen width without distorting the pennants.
+function buildBuntingTile() {
+  const W = 110;
+  const H = 62;
+  const p0 = [0, 4];
+  const p1 = [W, 4];
+  const c = [W / 2, 40];
+  const pennants = [];
+  const n = 5;
+  for (let j = 0; j < n; j++) {
+    const t = (j + 0.5) / n;
+    const x = (1 - t) * (1 - t) * p0[0] + 2 * (1 - t) * t * c[0] + t * t * p1[0];
+    const y = (1 - t) * (1 - t) * p0[1] + 2 * (1 - t) * t * c[1] + t * t * p1[1];
+    const dx = 2 * (1 - t) * (c[0] - p0[0]) + 2 * t * (p1[0] - c[0]);
+    const dy = 2 * (1 - t) * (c[1] - p0[1]) + 2 * t * (p1[1] - c[1]);
+    const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+    pennants.push(
+      `<polygon points="-9,0 9,0 0,24" fill="${HW_COLORS[j % HW_COLORS.length]}" stroke="rgba(0,0,0,.25)" stroke-width=".8" transform="translate(${x.toFixed(1)} ${y.toFixed(1)}) rotate(${angle.toFixed(1)})"/>`
+    );
+  }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><path d="M${p0[0]} ${p0[1]} Q${c[0]} ${c[1]} ${p1[0]} ${p1[1]}" fill="none" stroke="#3b3228" stroke-width="1.4"/>${pennants.join("")}</svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+}
+
+function Pumpkin({ size = 64, face = true }) {
+  return (
+    <svg viewBox="0 0 64 58" width={size} height={size * 0.906} aria-hidden="true">
+      <ellipse cx="18" cy="36" rx="15" ry="19" fill="#E8741A" />
+      <ellipse cx="46" cy="36" rx="15" ry="19" fill="#E8741A" />
+      <ellipse cx="32" cy="36" rx="14" ry="20" fill="#F59A3A" />
+      <path d="M32 18c-1 6-1 24 0 36" stroke="#C85F0F" strokeWidth="1.2" fill="none" opacity=".5" />
+      <path d="M29 18c0-5 1-8 3-10 1 2 2 3 4 3-1 3-1 5-1 7z" fill="#5B7F2B" />
+      <path d="M36 11c3-1 5 0 6 2" stroke="#5B7F2B" strokeWidth="1.6" fill="none" strokeLinecap="round" />
+      {face && (
+        <g fill="#2B1B0E">
+          <polygon points="20,32 27,32 23.5,25" />
+          <polygon points="37,32 44,32 40.5,25" />
+          <path d="M20 40l4 4 4-4 4 4 4-4 4 4 4-4-1 8q-11 5-22 0z" />
+        </g>
+      )}
+    </svg>
+  );
+}
+
+function Bat({ size = 34 }) {
+  return (
+    <svg viewBox="0 0 40 20" width={size} height={size / 2} aria-hidden="true">
+      <path
+        d="M20 6c-1-2-2-3-3-3 0 2-1 3-2 4-3-3-8-4-14-3 3 1 5 3 6 6-2 0-4 1-6 3 4-1 8 0 10 3 1-2 3-3 5-1 2-2 4-1 5 1 2-3 6-4 10-3-2-2-4-3-6-3 1-3 3-5 6-6-6-1-11 0-14 3-1-1-2-2-2-4-1 0-2 1-3 3z"
+        fill="#2A2420"
+      />
+    </svg>
+  );
+}
+
+function Cobweb({ size = 90 }) {
+  return (
+    <svg viewBox="0 0 90 90" width={size} height={size} aria-hidden="true" fill="none" stroke="#B9B1A2" strokeWidth="1" opacity=".8">
+      <path d="M0 0L90 0M0 0L80 34M0 0L60 60M0 0L34 80M0 0L0 90" />
+      <path d="M22 0Q18 18 0 22M44 0Q36 36 0 44M68 0Q54 54 0 68" />
+    </svg>
+  );
+}
+
+function Spider({ extra = "" }) {
+  return (
+    <div className={`di-hw-spider ${extra}`} aria-hidden="true">
+      <div className="di-hw-thread" />
+      <svg viewBox="0 0 30 24" width="30" height="24">
+        <g stroke="#2A2420" strokeWidth="1.4" strokeLinecap="round" fill="none">
+          <path d="M9 11l-7-5M9 13l-8 1M10 15l-6 7M21 11l7-5M21 13l8 1M20 15l6 7" />
+        </g>
+        <ellipse cx="15" cy="14" rx="7" ry="6.5" fill="#2A2420" />
+        <circle cx="12.5" cy="12.5" r="1.3" fill="#fff" />
+        <circle cx="17.5" cy="12.5" r="1.3" fill="#fff" />
+      </svg>
+    </div>
+  );
+}
+
+function Ghost({ size = 52 }) {
+  return (
+    <svg viewBox="0 0 40 48" width={size} height={size * 1.2} aria-hidden="true">
+      <path d="M4 44V20C4 9 11 3 20 3s16 6 16 17v24l-5-4-5 4-6-4-6 4-5-4z" fill="#fff" stroke="#CFC8E6" strokeWidth="1.2" />
+      <ellipse cx="14" cy="20" rx="2.6" ry="3.4" fill="#2A2420" />
+      <ellipse cx="26" cy="20" rx="2.6" ry="3.4" fill="#2A2420" />
+      <ellipse cx="20" cy="29" rx="3.2" ry="4" fill="#2A2420" />
+      <circle cx="9" cy="26" r="2.4" fill="#F4A6B8" opacity=".6" />
+      <circle cx="31" cy="26" r="2.4" fill="#F4A6B8" opacity=".6" />
+    </svg>
+  );
+}
+
+function Tombstone({ size = 40, cross = false }) {
+  return (
+    <svg viewBox="0 0 40 50" width={size} height={size * 1.25} aria-hidden="true">
+      <path d="M5 50V18C5 8 12 2 20 2s15 6 15 16v32z" fill="#8F8A98" stroke="#5D5866" strokeWidth="1.4" />
+      {cross ? (
+        <path d="M20 14v20M13 21h14" stroke="#5D5866" strokeWidth="3" strokeLinecap="round" />
+      ) : (
+        <text x="20" y="28" textAnchor="middle" fontSize="11" fontWeight="800" fill="#5D5866" fontFamily="Georgia, serif">
+          RIP
+        </text>
+      )}
+    </svg>
+  );
+}
+
+function Cauldron() {
+  return (
+    <svg className="di-hw-cauldron" viewBox="0 0 60 44" width="60" height="44" aria-hidden="true">
+      <ellipse cx="30" cy="12" rx="20" ry="6" fill="#6FCF4A" />
+      <circle className="di-hw-bubble di-hw-bubble-1" cx="22" cy="10" r="3" fill="#A6EE7E" />
+      <circle className="di-hw-bubble di-hw-bubble-2" cx="34" cy="9" r="2.4" fill="#A6EE7E" />
+      <circle className="di-hw-bubble di-hw-bubble-3" cx="40" cy="11" r="2" fill="#A6EE7E" />
+      <path d="M8 12c-2 16 4 30 22 30s24-14 22-30c-4 5-12 7-22 7S12 17 8 12z" fill="#2A2420" />
+      <rect x="5" y="9" width="50" height="5" rx="2.5" fill="#3d3731" />
+      <rect x="14" y="40" width="6" height="4" rx="1" fill="#2A2420" />
+      <rect x="40" y="40" width="6" height="4" rx="1" fill="#2A2420" />
+    </svg>
+  );
+}
+
+// Fixed, non-interactive layers: ghosts drifting past, creeping fog and a
+// little graveyard in the corner.
+function HalloweenExtras() {
+  return (
+    <div className="di-hw-extras" aria-hidden="true">
+      <div className="di-hw-fog" />
+      <span className="di-hw-ghost di-hw-ghost-1"><span><Ghost size={54} /></span></span>
+      <span className="di-hw-ghost di-hw-ghost-2"><span><Ghost size={40} /></span></span>
+      <span className="di-hw-ghost di-hw-ghost-3"><span><Ghost size={64} /></span></span>
+      <div className="di-hw-graves">
+        <Tombstone size={34} cross />
+        <Tombstone size={44} />
+        <Pumpkin size={38} />
+        <Tombstone size={30} />
+      </div>
+    </div>
+  );
+}
+
+// Garland, crepe streamers, a swinging spider and a couple of bats across the
+// top of the dashboard.
+function HalloweenDecor() {
+  const tile = useMemo(buildBuntingTile, []);
+  return (
+    <div className="di-hw-decor" aria-hidden="true">
+      <div className="di-hw-bunting" style={{ backgroundImage: tile }} />
+      <svg className="di-hw-streamer di-hw-streamer-l" viewBox="0 0 40 200" width="40" height="200">
+        <path d="M10 0C34 30 -8 62 14 96S34 160 12 200" stroke="#F28C28" strokeWidth="6" fill="none" strokeLinecap="round" />
+        <path d="M22 0C2 34 36 66 18 100S2 164 24 196" stroke="#7B4BB5" strokeWidth="5" fill="none" strokeLinecap="round" />
+      </svg>
+      <svg className="di-hw-streamer di-hw-streamer-r" viewBox="0 0 40 200" width="40" height="200">
+        <path d="M30 0C6 30 48 62 26 96S6 160 28 200" stroke="#7B4BB5" strokeWidth="6" fill="none" strokeLinecap="round" />
+        <path d="M18 0C38 34 4 66 22 100S38 164 16 196" stroke="#F28C28" strokeWidth="5" fill="none" strokeLinecap="round" />
+      </svg>
+      <Spider />
+      <Spider extra="di-hw-spider-2" />
+      <Spider extra="di-hw-spider-3" />
+      <span className="di-hw-bat di-hw-bat-1"><Bat /></span>
+      <span className="di-hw-bat di-hw-bat-2"><Bat size={26} /></span>
+    </div>
+  );
+}
+
 function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, roomAudits, openOrders, missingAuditItems, openAlerts, roomsAffected, myRoom, myName, setView, onToggle, onSetItemStatus, onSetCustomStatus, onRebuildFlags, onOpenAudit, roomSettings, onSetRoomSetting }) {
   const [openRoom, setOpenRoom] = useState(null);
   const [listOpen, setListOpen] = useState(false);
@@ -2806,17 +3024,21 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
   };
   const allClear = combinedTotal === 0 && openAlerts.length === 0;
 
+  const halloween = isHalloween();
+
   return (
-    <div className="di-page">
+    <div className={`di-page${halloween ? " is-halloween" : ""}`}>
+      <div className="di-hw-headwrap">
       <PageHeader
         eyebrow={new Date().toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long" })}
-        title={`${greeting}${myName ? `, ${myName}` : ""}`}
+        title={`${greeting}${myName ? `, ${myName}` : ""}${halloween ? " 🎃" : ""}`}
         sub={
           combinedTotal === 0
             ? "Everything's stocked and in its place. Enjoy the calm ✨"
             : `${combinedTotal} thing${combinedTotal === 1 ? "" : "s"} could use a little love today.`
         }
       />
+      </div>
 
       {!myRoom && (
         <div className="di-banner">
@@ -2831,7 +3053,7 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
 
       {allClear && (
         <div className="di-celebrate">
-          <span className="di-celebrate-emoji">🎉</span>
+          <span className="di-celebrate-emoji">{isHalloween() ? "🎃" : "🎉"}</span>
           <span>All {TREATMENT_ROOMS.length} rooms are good. Nothing's low, nothing's missing.</span>
         </div>
       )}
@@ -2844,6 +3066,7 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
         myRoom={myRoom}
         roomSettings={roomSettings}
         popRoom={popRoom}
+        halloween={halloween}
         onOpenRoom={setOpenRoom}
       />
 
@@ -5029,6 +5252,70 @@ const CSS = `
 @keyframes di-run { from { transform: translateX(-80px); } to { transform: translateX(calc(100vw + 30px)); } }
 @keyframes di-dance { from { transform: translateY(0) rotate(-10deg); } to { transform: translateY(-16px) rotate(10deg); } }
 @keyframes di-step { from { transform: rotate(-24deg); } to { transform: rotate(24deg); } }
+/* ---- halloween (temporary) ---- */
+.di-hw-decor { position: relative; height: 70px; margin: -8px -6px 6px; pointer-events: none; overflow: visible; }
+.di-hw-bunting { position: absolute; left: 0; right: 0; top: 0; height: 62px; background-repeat: repeat-x; background-size: 110px 62px; }
+.di-hw-streamer { position: absolute; top: -8px; transform-origin: 50% 0; animation: di-hw-flutter 3.2s ease-in-out infinite alternate; opacity: .95; }
+.di-hw-streamer-l { left: 2px; }
+.di-hw-streamer-r { right: 2px; animation-delay: -1.4s; }
+.di-hw-spider { position: absolute; left: 68%; top: 0; transform-origin: 50% 0; animation: di-hw-swing 3s ease-in-out infinite alternate; }
+.di-hw-thread { width: 1.5px; height: 46px; background: #6b6256; margin: 0 auto; }
+.di-hw-bat { position: absolute; top: 14px; left: -40px; animation: di-hw-fly 14s linear infinite; }
+.di-hw-bat-2 { top: 40px; animation-duration: 19s; animation-delay: -8s; }
+.di-hw-headwrap { position: relative; }
+.di-hw-pumpkins { position: absolute; right: 26px; top: -4px; display: flex; align-items: flex-end; gap: 2px; pointer-events: none; }
+.di-hw-pumpkins > :first-child { transform: rotate(-6deg); }
+.di-hw-pumpkins > :last-child { transform: rotate(8deg); margin-bottom: -2px; }
+.di-panel.has-hw { position: relative; }
+.di-hw-web { position: absolute; top: 0; left: 0; pointer-events: none; border-top-left-radius: 18px; overflow: hidden; }
+.di-hw-peek { position: absolute; right: 34px; top: -22px; pointer-events: none; transform: rotate(7deg); filter: drop-shadow(0 3px 4px rgba(0,0,0,.2)); }
+.di-hw-wrap { max-width: 920px; }
+.di-main.hw-on { background: linear-gradient(180deg, #FFEFD9 0, rgba(255,239,217,0) 300px) no-repeat; }
+.hw-on .di-page-head { position: relative; }
+.hw-on .di-page-head::after { content: ""; position: absolute; right: 26px; top: -10px; width: 118px; height: 58px; background: ${HW_PUMPKIN_PAIR} no-repeat right center / contain; pointer-events: none; }
+.hw-on .di-page-head h1 { color: #C2570C; }
+.hw-on .di-eyebrow { color: #6B3FA0; }
+.hw-on .di-page-head p { padding-right: 120px; }
+.hw-on .di-page-head h1, .hw-on .di-eyebrow { padding-right: 120px; }
+.hw-on .di-panel { border-color: #F2DDC2; }
+@keyframes di-hw-flutter { from { transform: skewX(-4deg) rotate(1.5deg); } to { transform: skewX(4deg) rotate(-1.5deg); } }
+@keyframes di-hw-swing { from { transform: rotate(-7deg); } to { transform: rotate(7deg); } }
+@keyframes di-hw-fly { 0% { transform: translate(0, 0); } 25% { transform: translate(28vw, 12px); } 50% { transform: translate(58vw, -4px); } 75% { transform: translate(86vw, 14px); } 100% { transform: translate(115vw, 0); } }
+@media (prefers-reduced-motion: reduce) { .di-hw-streamer, .di-hw-spider, .di-hw-bat { animation: none; } .di-hw-bat { display: none; } }
+/* ---- halloween: extra spooky ---- */
+.di-hw-extras { position: fixed; inset: 0; pointer-events: none; z-index: 55; overflow: hidden; }
+.di-hw-fog { position: absolute; left: -10%; right: -10%; bottom: 0; height: 130px; background: radial-gradient(ellipse at 20% 100%, rgba(190,170,225,.45), transparent 60%), radial-gradient(ellipse at 75% 100%, rgba(255,190,120,.35), transparent 62%); animation: di-hw-fog 9s ease-in-out infinite alternate; }
+.di-hw-ghost { position: absolute; left: -90px; opacity: .6; animation: di-hw-drift 26s linear infinite; }
+.di-hw-ghost > span { display: block; animation: di-hw-bob 3s ease-in-out infinite alternate; }
+.di-hw-ghost-1 { top: 22%; }
+.di-hw-ghost-2 { top: 52%; animation-duration: 34s; animation-delay: -12s; opacity: .5; }
+.di-hw-ghost-3 { top: 74%; animation-duration: 42s; animation-delay: -25s; opacity: .45; }
+.di-hw-graves { position: absolute; right: 10px; bottom: 4px; display: flex; align-items: flex-end; gap: 2px; opacity: .92; }
+.di-hw-cauldron { position: absolute; bottom: 8px; right: 12px; }
+.di-hw-bubble { transform-box: fill-box; transform-origin: 50% 100%; animation: di-hw-bubble 1.8s ease-in infinite; }
+.di-hw-bubble-2 { animation-delay: .6s; }
+.di-hw-bubble-3 { animation-delay: 1.1s; }
+.di-hw-spider-2 { left: 24%; }
+.di-hw-spider-2 .di-hw-thread { height: 30px; }
+.di-hw-spider-3 { left: 46%; animation-delay: -1.2s; }
+.di-hw-spider-3 .di-hw-thread { height: 56px; }
+.di-tile.is-steri { position: relative; overflow: visible; }
+@keyframes di-hw-drift { 0% { transform: translateX(0); } 100% { transform: translateX(calc(100vw + 180px)); } }
+@keyframes di-hw-bob { from { transform: translateY(-12px) rotate(-4deg); } to { transform: translateY(12px) rotate(4deg); } }
+@keyframes di-hw-fog { from { transform: translateX(-3%); opacity: .75; } to { transform: translateX(3%); opacity: 1; } }
+@keyframes di-hw-bubble { 0% { transform: translateY(6px) scale(.5); opacity: 0; } 30% { opacity: 1; } 100% { transform: translateY(-14px) scale(1.15); opacity: 0; } }
+.hw-on .di-tile.is-pop { animation: di-pop .9s ease; }
+.hw-on .di-panel.has-hw .di-hw-peek svg, .hw-on .di-hw-pumpkins svg { animation: di-hw-glow 2.6s ease-in-out infinite alternate; }
+@keyframes di-hw-glow { from { filter: brightness(1); } to { filter: brightness(1.18) drop-shadow(0 0 6px rgba(255,170,60,.7)); } }
+@media (prefers-reduced-motion: reduce) { .di-hw-ghost, .di-hw-ghost > span, .di-hw-fog, .di-hw-bubble { animation: none; } .di-hw-ghost { display: none; } }
+/* ---- halloween: cobwebs on rooms that need attention ---- */
+.di-tile-web { position: absolute; right: 0; bottom: 0; width: 30px; height: 30px; transform: scale(-1, -1); pointer-events: none; overflow: hidden; border-bottom-left-radius: 0; }
+.di-tile-web svg { stroke: #5f574e; stroke-width: 1.5; opacity: .9; }
+.di-tile.is-wide .di-tile-web, .di-tile.is-steri .di-tile-web { width: 48px; height: 48px; }
+.di-sheet-web { position: absolute; top: 0; right: 0; pointer-events: none; transform: scaleX(-1); z-index: 0; }
+.di-sheet-web svg { stroke: #9a9285; }
+.di-sheet { position: relative; }
+.di-sheet-head, .di-sheet-stats { position: relative; z-index: 1; }
 .di-edit-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 12px; }
 .di-edit-row { display: flex; align-items: center; gap: 8px; padding: 7px 4px; font-size: 14px; cursor: pointer; }
 .di-edit-row input { width: 18px; height: 18px; }
