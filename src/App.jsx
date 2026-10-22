@@ -2157,14 +2157,17 @@ function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, 
   // The U, to match the real floor: Room 1 starts at the top of the left
   // arm and runs down (Rooms 1-5), along the bottom (Rooms 6-10), then up
   // the right arm (Rooms 11-18, with 11 at the bottom corner). The arms hold
-  // different numbers of rooms, so both are drawn on a 35-unit-tall grid:
-  // each left room spans 7 units, each right room spans 5, which keeps the
+  // different numbers of rooms, so both are drawn on a 36-unit-tall grid:
+  // each left room spans 9 units, each right room spans 6, which keeps the
   // two arms exactly the same length.
   const uPlacements = {};
-  for (let i = 1; i <= 5; i++) uPlacements[i] = { gridColumn: 1, gridRow: `${(i - 1) * 7 + 1} / span 7` };
-  for (let i = 6; i <= 10; i++) uPlacements[i] = { gridColumn: i - 5, gridRow: 36 };
-  uPlacements[11] = { gridColumn: 6, gridRow: 36 };
-  for (let i = 12; i <= 18; i++) uPlacements[i] = { gridColumn: 6, gridRow: `${(18 - i) * 5 + 1} / span 5` };
+  [1, 3, 4, 5].forEach((n, k) => { uPlacements[n] = { gridColumn: 1, gridRow: `${k * 9 + 1} / span 9` }; });
+  for (let i = 6; i <= 10; i++) uPlacements[i] = { gridColumn: i - 5, gridRow: 37 };
+  uPlacements[11] = { gridColumn: 6, gridRow: 37 };
+  [18, 17, 16, 14, 13, 12].forEach((n, k) => { uPlacements[n] = { gridColumn: 6, gridRow: `${k * 6 + 1} / span 6` }; });
+  // Rooms 2 and 15 sit directly above Sterilisation, side by side.
+  uPlacements[2] = { gridColumn: "2 / 4", gridRow: "7 / 15" };
+  uPlacements[15] = { gridColumn: "4 / 6", gridRow: "7 / 15" };
 
   return (
     <div className={`di-panel${halloween ? " has-hw" : ""}`}>
@@ -2179,7 +2182,7 @@ function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, 
         <span className="di-hint-inline">Tap a room</span>
       </div>
       <div className="di-u">
-        {renderTile("Sterilisation", "steri", { gridColumn: "2 / 6", gridRow: "14 / 36" })}
+        {renderTile("Sterilisation", "steri", { gridColumn: "2 / 6", gridRow: "15 / 37" })}
         {TREATMENT_ROOMS.map((r) => renderTile(r, "room", uPlacements[parseInt(r.slice(5), 10)]))}
         {UNUSABLE_ROOMS.map((r) => (
           <div
@@ -2192,7 +2195,7 @@ function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, 
             <span className="di-tile-label">{r.slice(5)}</span>
           </div>
         ))}
-        {renderTile("Lab", "lab", { gridColumn: "2 / 6", gridRow: 38 })}
+        {renderTile("Lab", "lab", { gridColumn: "2 / 6", gridRow: 39 })}
       </div>
       <div className="di-legend">
         <span><i className="di-legend-dot" style={{ background: "var(--green)" }} /> All good</span>
@@ -5107,7 +5110,7 @@ const CSS = `
 
 /* ---- floor map ---- */
 .di-hint-inline { font-size: 12px; color: var(--ink-soft); }
-.di-u { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); grid-template-rows: repeat(35, 9px) minmax(46px, auto) 14px minmax(52px, auto); column-gap: 6px; row-gap: 0; }
+.di-u { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); grid-template-rows: repeat(36, 8.75px) minmax(46px, auto) 14px minmax(52px, auto); column-gap: 6px; row-gap: 0; }
 .di-u > .di-tile { margin: 3px 0; }
 .di-tile {
   position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center;
