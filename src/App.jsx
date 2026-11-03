@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { doc, onSnapshot, setDoc, updateDoc, deleteDoc, collection, query, orderBy, limit } from "firebase/firestore";
+import { doc, onSnapshot, setDoc, updateDoc, deleteDoc, collection, query, orderBy, limit, increment } from "firebase/firestore";
 import { db } from "./firebase.js";
 import {
   LayoutDashboard,
@@ -27,6 +27,8 @@ import {
   ChevronDown,
   ChevronRight,
   Bell,
+  Minus,
+  Plus,
 } from "lucide-react";
 import {
   BarChart,
@@ -378,6 +380,10 @@ const DEFAULT_AUDIT_CHECKLIST = {
     "Discovery sheets", "TCA + bicarb", "Pens", "DB pricing packs",
   ].map(mkChecklistItem),
 };
+
+// Rooms that keep their own private stock counts (separate from the shared
+// low-stock flags). Add a room name here to give it the same feature.
+const PERSONAL_STOCK_ROOMS = ["Room 15"];
 
 const ITEMS_KEY = "dental-inv-items-v2";
 const FLAGS_KEY = "dental-inv-active-flags-v1";
@@ -872,6 +878,9 @@ export default function DentalInventoryApp() {
   const [endoStatus, setEndoStatus] = useState({}); // { [sectionId]: { status, updatedAt, updatedBy } }
   const [roomSettings, setRoomSettings] = useState({}); // { [room]: { color, name } }
   const [roomAuditStatus, setRoomAuditStatus] = useState(null); // { [room]: { [checklistItemId]: {status, updatedAt, updatedBy} } }
+  const [personalStock, setPersonalStock] = useState({}); // { [room]: { [itemId]: {name,category,count,...} } }
+  const [personalRoom, setPersonalRoom] = useState(null);
+  const [sharpsBins, setSharpsBins] = useState({}); // { [room]: { status, updatedAt, updatedBy } }
   const [auditRoom, setAuditRoom] = useState(null); // which room's audit page is open right now
   const [myRoom, setMyRoomState] = useState(null);
   const [myName, setMyNameState] = useState(null);
@@ -1094,6 +1103,40 @@ export default function DentalInventoryApp() {
       () => {}
     );
 
+    const unsubPersonalStock = onSnapshot(
+      query(collection(db, "personalStock")),
+      (snap) => {
+        const byRoom = {};
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          byRoom[data.room] = byRoom[data.room] || {};
+          byRoom[data.room][data.itemId] = {
+            name: data.name,
+            category: data.category || "",
+            count: typeof data.count === "number" ? data.count : 0,
+            updatedAt: data.updatedAt,
+            updatedBy: data.updatedBy || "",
+            lastUsedAt: data.lastUsedAt || null,
+          };
+        });
+        setPersonalStock(byRoom);
+      },
+      () => {}
+    );
+
+    const unsubSharps = onSnapshot(
+      query(collection(db, "sharpsBins")),
+      (snap) => {
+        const byRoom = {};
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          byRoom[data.room] = { status: data.status, updatedAt: data.updatedAt, updatedBy: data.updatedBy || "" };
+        });
+        setSharpsBins(byRoom);
+      },
+      () => {}
+    );
+
     const unsubRoomSettings = onSnapshot(
       query(collection(db, "roomSettings")),
       (snap) => {
@@ -1146,6 +1189,8 @@ export default function DentalInventoryApp() {
       unsubAuditChecklist();
       unsubRoomCustomAuditItems();
       unsubRoomSettings();
+      unsubPersonalStock();
+      unsubSharps();
       unsubEndo();
       unsubExclusions();
       unsubRoomAuditStatus();
@@ -1458,6 +1503,99 @@ export default function DentalInventoryApp() {
       return { ok: false, denied };
     }
   }, []);
+
+  // ---- personal stock (e.g. Room 15): one document per room+item ---------
+  const personalStockRef = useRef(personalStock);
+  personalStockRef.current = personalStock;
+  const personalStockError = useCallback((e) => {
+    const denied = e && e.code === "permission-denied";
+    setSaveError(
+      denied
+        ? "Personal stock needs the updated Firestore rules -- publish firestore.rules in the Firebase console."
+        : "Couldn't save -- check your connection."
+    );
+  }, []);
+  const addPersonalStockItem = useCallback(
+    (room, item, staff) => {
+      setDoc(doc(db, "personalStock", `${room}::${item.id}`), {
+        room,
+        itemId: item.id,
+        name: item.name,
+        category: item.category || "",
+        count: 0,
+        updatedAt: new Date().toISOString(),
+        updatedBy: staff || "",
+      }).catch(personalStockError);
+    },
+    [personalStockError]
+  );
+  const setPersonalStockCount = useCallback(
+    (room, itemId, count, staff) => {
+      updateDoc(doc(db, "personalStock", `${room}::${itemId}`), {
+        count: Math.max(0, Math.round(Number(count) || 0)),
+        updatedAt: new Date().toISOString(),
+        updatedBy: staff || "",
+      }).catch(personalStockError);
+    },
+    [personalStockError]
+  );
+  // "Used one": atomic decrement, so two people tapping at once both count.
+  const recordPersonalUse = useCallback(
+    (room, itemId, staff) => {
+      const now = new Date().toISOString();
+      const it = personalStockRef.current[room] && personalStockRef.current[room][itemId];
+      const evt = {
+        id: `h_${Date.now()}_${Math.round(Math.random() * 9999)}`,
+        itemId: null,
+        room,
+        action: "personal_used",
+        itemName: it ? it.name : "an item",
+        staff: staff || "",
+        date: now,
+      };
+      setDoc(doc(collection(db, "flagHistoryEvents"), evt.id), evt).catch(() => {});
+      updateDoc(doc(db, "personalStock", `${room}::${itemId}`), {
+        count: increment(-1),
+        updatedAt: now,
+        updatedBy: staff || "",
+        lastUsedAt: now,
+      }).catch(personalStockError);
+    },
+    [personalStockError]
+  );
+  const removePersonalStockItem = useCallback(
+    (room, itemId) => {
+      deleteDoc(doc(db, "personalStock", `${room}::${itemId}`)).catch(personalStockError);
+    },
+    [personalStockError]
+  );
+
+  // Sharps bin per room: "full" or "clear". Each change is also logged so it
+  // shows up in the dashboard's recent activity.
+  const setSharpsStatus = useCallback(
+    (room, status, staff) => {
+      const now = new Date().toISOString();
+      const evt = {
+        id: `h_${Date.now()}_${Math.round(Math.random() * 9999)}`,
+        itemId: null,
+        room,
+        action: "sharps_status",
+        status,
+        staff: staff || "",
+        date: now,
+      };
+      setDoc(doc(collection(db, "flagHistoryEvents"), evt.id), evt).catch(() => {});
+      setDoc(doc(db, "sharpsBins", room), { room, status, updatedAt: now, updatedBy: staff || "" }).catch((e) => {
+        const denied = e && e.code === "permission-denied";
+        setSaveError(
+          denied
+            ? "Sharps bins need the updated Firestore rules -- publish firestore.rules in the Firebase console."
+            : "Couldn't save -- check your connection."
+        );
+      });
+    },
+    []
+  );
 
   const setCustomAuditItemStatus = useCallback((room, itemId, status, staff, itemText) => {
     const now = new Date().toISOString();
@@ -1848,6 +1986,14 @@ export default function DentalInventoryApp() {
             setAuditRoom(room);
             setView("audit-room");
           }}
+          personalStock={personalStock}
+          sharpsBins={sharpsBins}
+          onSetSharps={setSharpsStatus}
+          onUsePersonal={recordPersonalUse}
+          onOpenPersonal={(room) => {
+            setPersonalRoom(room);
+            setView("personal-stock");
+          }}
           activeFlags={flagsWithEndo}
           backorderedItems={backorderedItems}
           roomAudits={roomAudits}
@@ -1894,6 +2040,20 @@ export default function DentalInventoryApp() {
           myName={myName}
           setMyName={setMyName}
           onSetStatus={setEndoSectionStatus}
+          onBack={() => setView("dashboard")}
+        />
+      )}
+      {view === "personal-stock" && (
+        <PersonalStock
+          room={personalRoom}
+          items={items}
+          stock={personalStock[personalRoom] || {}}
+          myName={myName}
+          setMyName={setMyName}
+          onAdd={addPersonalStockItem}
+          onSetCount={setPersonalStockCount}
+          onUse={recordPersonalUse}
+          onRemove={removePersonalStockItem}
           onBack={() => setView("dashboard")}
         />
       )}
@@ -2315,6 +2475,11 @@ function RoomSheet({
   onResolveMissing,
   onOpenAudit,
   onOpenEndo,
+  personalStock,
+  onUsePersonal,
+  onOpenPersonal,
+  sharpsBins,
+  onSetSharps,
   onClose,
 }) {
   const settings = (roomSettings && roomSettings[room]) || { color: "", name: "" };
@@ -2418,9 +2583,15 @@ function RoomSheet({
               )}
             </div>
           </div>
-          <button className="di-sheet-close" onClick={onClose} aria-label="Close">
-            <X size={18} />
-          </button>
+          <div className="di-sheet-corner">
+            <button className="di-sheet-close" onClick={onClose} aria-label="Close">
+              <X size={18} />
+            </button>
+            <SharpsBin
+              status={(sharpsBins && sharpsBins[room] && sharpsBins[room].status) || ""}
+              onChange={(st) => onSetSharps(room, st, myName)}
+            />
+          </div>
         </div>
 
         {isTreatment && (
@@ -2591,6 +2762,36 @@ function RoomSheet({
           </div>
         )}
 
+        {PERSONAL_STOCK_ROOMS.includes(room) && (() => {
+          const mine = Object.entries((personalStock && personalStock[room]) || {})
+            .map(([id, v]) => ({ id, ...v }))
+            .sort((a, b) => a.name.localeCompare(b.name));
+          return (
+            <div className="di-sheet-section">
+              <div className="di-sheet-section-title">{room}'s own stock</div>
+              {mine.length === 0 ? (
+                <div className="di-sheet-empty">Nothing set up yet. Tap "Manage {room}'s stock" to add items.</div>
+              ) : (
+                <ul className="di-ps-list">
+                  {mine.map((it) => (
+                    <li key={it.id} className="di-ps-row">
+                      <span className="di-ps-name">{it.name}</span>
+                      <span className={`di-ps-count${it.count <= 0 ? " is-zero" : ""}`}>{Math.max(0, it.count)}</span>
+                      <button
+                        className="di-small-btn"
+                        disabled={it.count <= 0}
+                        onClick={() => onUsePersonal(room, it.id, myName)}
+                      >
+                        <Minus size={12} /> Used
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          );
+        })()}
+
         <div className="di-sheet-section">
           <div className="di-sheet-section-title">Recent activity</div>
           {activity.length === 0 ? (
@@ -2615,6 +2816,13 @@ function RoomSheet({
             </button>
           </div>
         )}
+        {PERSONAL_STOCK_ROOMS.includes(room) && (
+          <div className="di-sheet-cta-wrap" style={{ position: "static", margin: "10px 0 0", padding: 0, background: "none" }}>
+            <button className="di-small-btn di-small-btn-ghost di-sheet-cta" onClick={() => onOpenPersonal(room)}>
+              <Package size={14} /> Manage {room}'s stock
+            </button>
+          </div>
+        )}
         {isTreatment && (
           <div className="di-sheet-cta-wrap">
             <button className="di-small-btn di-sheet-cta" onClick={() => onOpenAudit(room)}>
@@ -2631,6 +2839,84 @@ function RoomSheet({
 // pop-away animation, then marks the item as back in the room.
 // A softer dropdown that matches the app's look (the browser's built-in
 // select list can't be styled). Closes on outside click or Escape.
+function SharpsBin({ status, onChange }) {
+  const label = status === "full" ? "Full" : status === "clear" ? "Clear" : "Set status";
+  return (
+    <div className={`di-sharps${status ? ` is-${status}` : ""}`}>
+      <span className="di-sharps-label">
+        <Trash2 size={13} /> Sharps Bin
+      </span>
+      <SoftSelect
+        value={label}
+        options={["Clear", "Full"]}
+        ariaLabel="Sharps bin status"
+        onChange={(o) => onChange(o.toLowerCase())}
+      />
+    </div>
+  );
+}
+
+// What each kind of logged event says, in plain words.
+function describeActivity(h, itemsById) {
+  const who = h.staff ? h.staff : "Someone";
+  const name = h.itemId && itemsById[h.itemId] ? itemsById[h.itemId].name : "an item";
+  switch (h.action) {
+    case "flagged":
+      return { text: `${who} flagged ${name} low`, tone: "red" };
+    case "resolved":
+      return { text: `${who} restocked ${name}`, tone: "green" };
+    case "audited":
+      return { text: `${who} completed an audit (${h.reviewedCount ?? 0} reviewed)`, tone: "green" };
+    case "instrument_missing":
+      return { text: `${h.instrumentName || "An item"} marked missing`, tone: "clay" };
+    case "endo_low":
+      return { text: `Endo trolley: ${h.sectionName || "a section"} is ${h.level === "out" ? "out" : "low"}`, tone: "red" };
+    case "sharps_status":
+      return { text: `${who} set the sharps bin to ${h.status === "full" ? "full" : "clear"}`, tone: h.status === "full" ? "red" : "green" };
+    case "personal_used":
+      return { text: `${who} used ${h.itemName || "an item"}`, tone: "neutral" };
+    default:
+      return null;
+  }
+}
+
+function RecentActivity({ history, itemsById }) {
+  const [showAll, setShowAll] = useState(false);
+  const rows = (history || [])
+    .map((h) => ({ h, d: describeActivity(h, itemsById) }))
+    .filter((r) => r.d)
+    .sort((a, b) => new Date(b.h.date) - new Date(a.h.date))
+    .slice(0, showAll ? 30 : 8);
+  return (
+    <div className="di-panel">
+      <div className="di-panel-head">
+        <h3>Recent activity</h3>
+        <span className="di-hint-inline">Across the clinic</span>
+      </div>
+      {rows.length === 0 ? (
+        <EmptyState icon={Info} text="No activity yet." />
+      ) : (
+        <ul className="di-ra-list">
+          {rows.map(({ h, d }) => (
+            <li key={h.id} className="di-ra-row">
+              <i className={`di-ra-dot is-${d.tone}`} />
+              <span className="di-ra-text">
+                {d.text} <span className="di-ra-room">· {h.room}</span>
+              </span>
+              <span className="di-cell-sub">{timeAgo(h.date)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {!showAll && (history || []).length > 8 && (
+        <button className="di-linklike" style={{ marginTop: 8 }} onClick={() => setShowAll(true)}>
+          Show more
+        </button>
+      )}
+    </div>
+  );
+}
+
 function SoftSelect({ value, options, onChange, ariaLabel }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
@@ -2949,7 +3235,7 @@ function HalloweenDecor() {
   );
 }
 
-function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, roomAudits, openOrders, missingAuditItems, openAlerts, roomsAffected, myRoom, myName, setView, onToggle, onSetItemStatus, onSetCustomStatus, onRebuildFlags, onOpenAudit, roomSettings, onSetRoomSetting }) {
+function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, roomAudits, openOrders, missingAuditItems, openAlerts, roomsAffected, myRoom, myName, setView, onToggle, onSetItemStatus, onSetCustomStatus, onRebuildFlags, onOpenAudit, roomSettings, onSetRoomSetting, personalStock, onUsePersonal, onOpenPersonal, sharpsBins, onSetSharps }) {
   const [openRoom, setOpenRoom] = useState(null);
   const [listOpen, setListOpen] = useState(false);
   const [cheerMsg, setCheerMsg] = useState(null);
@@ -3075,6 +3361,8 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
 
       <LostAndFound missingAuditItems={missingAuditItems} roomSettings={roomSettings} onResolveMissing={resolveMissing} />
 
+      <RecentActivity history={history} itemsById={itemsById} />
+
       {openRoom && (
         <RoomSheet
           room={openRoom}
@@ -3097,6 +3385,14 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
           onOpenEndo={() => {
             setOpenRoom(null);
             setView("endo-trolley");
+          }}
+          personalStock={personalStock}
+          sharpsBins={sharpsBins}
+          onSetSharps={onSetSharps}
+          onUsePersonal={onUsePersonal}
+          onOpenPersonal={(r) => {
+            setOpenRoom(null);
+            onOpenPersonal(r);
           }}
           onClose={() => setOpenRoom(null)}
         />
@@ -3884,6 +4180,135 @@ function AuditSection({ section, sectionItems, roomStatus, onSetStatus, onRemove
 /* ============================================================================
    ENDO TROLLEY -- two trays of file-size sections, each Full / Low / Out
 ============================================================================ */
+function PersonalStock({ room, items, stock, myName, setMyName, onAdd, onSetCount, onUse, onRemove, onBack }) {
+  const [staff, setStaff] = useState("");
+  const [q, setQ] = useState("");
+  useEffect(() => {
+    if (myName) setStaff(myName);
+  }, [myName]);
+  if (!room) {
+    return (
+      <div className="di-page">
+        <EmptyState icon={Info} text="No room selected." />
+      </div>
+    );
+  }
+  const mine = Object.entries(stock)
+    .map(([id, v]) => ({ id, ...v }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const needle = q.trim().toLowerCase();
+  const matches = needle
+    ? items.filter((i) => !stock[i.id] && i.name.toLowerCase().includes(needle)).slice(0, 8)
+    : [];
+  const rememberName = () => staff && staff !== myName && setMyName(staff);
+
+  return (
+    <div className="di-page">
+      <button className="di-linklike di-back-link" onClick={onBack}>
+        &larr; Back to dashboard
+      </button>
+      <PageHeader
+        eyebrow={room}
+        title={`${room}'s own stock`}
+        sub="Pick items from the catalogue and keep a running count. Press Used whenever you use one -- it counts down, and the count shows when you tap the room on the dashboard."
+      />
+
+      <div className="di-panel">
+        <div className="di-field" style={{ maxWidth: 220 }}>
+          <label>Your name (optional)</label>
+          <input placeholder="e.g. Jess" value={staff} onChange={(e) => setStaff(e.target.value)} onBlur={rememberName} />
+        </div>
+      </div>
+
+      <div className="di-panel">
+        <div className="di-panel-head">
+          <h3>Add from the catalogue</h3>
+        </div>
+        <div className="di-search di-search-wide">
+          <Search size={14} />
+          <input placeholder="Search the catalogue…" value={q} onChange={(e) => setQ(e.target.value)} />
+        </div>
+        {needle && matches.length === 0 && <div className="di-hint-text" style={{ marginTop: 8 }}>No matching catalogue items (or already added).</div>}
+        {matches.length > 0 && (
+          <ul className="di-ps-list" style={{ marginTop: 8 }}>
+            {matches.map((i) => (
+              <li key={i.id} className="di-ps-row">
+                <span className="di-ps-name">
+                  {i.name}
+                  {i.category ? <span className="di-cell-sub"> · {i.category}</span> : null}
+                </span>
+                <button
+                  className="di-small-btn"
+                  onClick={() => {
+                    rememberName();
+                    onAdd(room, i, staff);
+                    setQ("");
+                  }}
+                >
+                  <Plus size={12} /> Add
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="di-panel">
+        <div className="di-panel-head">
+          <h3>Counts</h3>
+          <span className="di-panel-count">{mine.length}</span>
+        </div>
+        {mine.length === 0 ? (
+          <EmptyState icon={Package} text="Nothing here yet. Search above to add your first item." />
+        ) : (
+          <ul className="di-ps-list">
+            {mine.map((it) => (
+              <li key={it.id} className="di-ps-row">
+                <span className="di-ps-name">
+                  {it.name}
+                  {it.updatedAt ? <span className="di-cell-sub"> · updated {timeAgo(it.updatedAt)}{it.updatedBy ? ` by ${it.updatedBy}` : ""}</span> : null}
+                </span>
+                <span className="di-ps-stepper">
+                  <button className="di-ps-step" aria-label="Minus one" disabled={it.count <= 0} onClick={() => onSetCount(room, it.id, it.count - 1, staff)}>
+                    <Minus size={14} />
+                  </button>
+                  <input
+                    className="di-ps-input"
+                    type="number"
+                    min="0"
+                    inputMode="numeric"
+                    key={`${it.id}-${it.count}`}
+                    defaultValue={Math.max(0, it.count)}
+                    onBlur={(e) => {
+                      const n = Math.max(0, Math.round(Number(e.target.value) || 0));
+                      if (n !== it.count) onSetCount(room, it.id, n, staff);
+                    }}
+                  />
+                  <button className="di-ps-step" aria-label="Plus one" onClick={() => onSetCount(room, it.id, it.count + 1, staff)}>
+                    <Plus size={14} />
+                  </button>
+                </span>
+                <button className="di-small-btn" disabled={it.count <= 0} onClick={() => onUse(room, it.id, staff)}>
+                  <Minus size={12} /> Used
+                </button>
+                <button
+                  className="di-audit-btn-remove"
+                  title="Remove from this list"
+                  onClick={() => {
+                    if (window.confirm(`Remove ${it.name} from ${room}'s stock list?`)) onRemove(room, it.id);
+                  }}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function EndoTrolley({ endoStatus, myName, setMyName, onSetStatus, onBack }) {
   const [picking, setPicking] = useState(null); // { id, name, tray } | null
   const [staff, setStaff] = useState("");
@@ -5320,6 +5745,30 @@ const CSS = `
 .di-sheet { position: relative; }
 .di-sheet-head, .di-sheet-stats { position: relative; z-index: 1; }
 .di-edit-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 12px; }
+.di-sheet-corner { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.di-sharps { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.di-sharps.is-full { background: #FBE6E3; border-color: #E9B7B0; }
+.di-sharps.is-clear { background: #E6F2E9; border-color: #B9D9C2; }
+.di-sharps-label { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; color: var(--ink-soft); }
+.di-ra-list { list-style: none; margin: 0; padding: 0; }
+.di-ra-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.di-ra-row:last-child { border-bottom: none; }
+.di-ra-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: #9A968C; }
+.di-ra-dot.is-red { background: var(--red); }
+.di-ra-dot.is-green { background: var(--green); }
+.di-ra-dot.is-clay { background: var(--clay); }
+.di-ra-text { flex: 1; min-width: 0; }
+.di-ra-room { color: var(--ink-soft); }
+.di-ps-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.di-ps-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.di-ps-row:last-child { border-bottom: none; }
+.di-ps-name { flex: 1; min-width: 140px; font-size: 13.5px; }
+.di-ps-count { min-width: 28px; text-align: center; font-weight: 700; font-size: 16px; color: var(--green); }
+.di-ps-count.is-zero { color: var(--red); }
+.di-ps-stepper { display: inline-flex; align-items: center; gap: 4px; }
+.di-ps-step { width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; display: grid; place-items: center; color: var(--ink); }
+.di-ps-step:disabled, .di-small-btn:disabled { opacity: .4; cursor: not-allowed; }
+.di-ps-input { width: 52px; text-align: center; border: 1px solid var(--line); border-radius: 8px; padding: 6px 4px; font-size: 14px; font-family: inherit; background: #fff; }
 .di-edit-row { display: flex; align-items: center; gap: 8px; padding: 7px 4px; font-size: 14px; cursor: pointer; }
 .di-edit-row input { width: 18px; height: 18px; }
 .di-endo-row + .di-endo-row { margin-top: 14px; }

@@ -46,5 +46,11 @@ service cloud.firestore {
     match /roomAuditExclusions/{document} {
       allow read, write: if true;
     }
+    match /personalStock/{document} {
+      allow read, write: if true;
+    }
+    match /sharpsBins/{document} {
+      allow read, write: if true;
+    }
   }
 }
