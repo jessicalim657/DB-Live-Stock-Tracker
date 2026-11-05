@@ -52,5 +52,8 @@ service cloud.firestore {
     match /sharpsBins/{document} {
       allow read, write: if true;
     }
+    match /labChecks/{document} {
+      allow read, write: if true;
+    }
   }
 }

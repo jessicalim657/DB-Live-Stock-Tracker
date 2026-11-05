@@ -27,6 +27,13 @@ import {
   ChevronDown,
   ChevronRight,
   Bell,
+  FlaskConical,
+  Droplets,
+  Sparkles,
+  Waves,
+  BatteryCharging,
+  Cpu,
+  Stethoscope,
   Minus,
   Plus,
 } from "lucide-react";
@@ -384,6 +391,59 @@ const DEFAULT_AUDIT_CHECKLIST = {
 // Rooms that keep their own private stock counts (separate from the shared
 // low-stock flags). Add a room name here to give it the same feature.
 const PERSONAL_STOCK_ROOMS = ["Room 15"];
+
+// ---- Lab checklist ---------------------------------------------------------
+// Timed tasks come due on a schedule and show as "Due" (page, side menu badge
+// and dashboard banner) until someone marks them done. Untimed tasks are
+// simple "last checked" reminders.
+const LAB_ANCHOR_YEAR = 2026;
+const LAB_ANCHOR_MONTH = 10; // November (0-based)
+const LAB_ANCHOR_DAY = 18; // 2 weeks after 4 Nov 2026
+const LAB_GROUPS = [
+  { id: "cerec", title: "CEREC machine checklist" },
+  { id: "endo", title: "Endo reminder" },
+];
+const LAB_TASKS = [
+  { id: "cerec-water", group: "cerec", name: "Change water", icon: "water", schedule: { kind: "weekly", weekday: 3 }, repeatLabel: "Every Wednesday" },
+  { id: "cerec-clean", group: "cerec", name: "Run cleaning program (2 mins)", icon: "clean", schedule: { kind: "daily" }, repeatLabel: "Every morning" },
+  { id: "cerec-filter", group: "cerec", name: "Change water filter + sponge", icon: "filter", schedule: { kind: "monthly" }, repeatLabel: "Every month, first due 18 Nov" },
+  { id: "endo-handpieces", group: "endo", name: "Check all handpieces are charged", icon: "battery", schedule: { kind: "daily" }, repeatLabel: "Every morning" },
+  { id: "endo-stock", group: "endo", name: "Check stock levels of trolley", icon: "box", schedule: { kind: "daily" }, repeatLabel: "Every morning", link: { view: "endo-trolley", label: "Open endo trolley" } },
+];
+function labSchedule(task, now) {
+  const sc = task.schedule;
+  if (!sc) return null;
+  if (sc.kind === "daily") {
+    const d = new Date(now);
+    d.setHours(0, 0, 0, 0);
+    const next = new Date(d);
+    next.setDate(next.getDate() + 1);
+    return { latest: d, next };
+  }
+  if (sc.kind === "weekly") {
+    const d = new Date(now);
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - ((d.getDay() - sc.weekday + 7) % 7));
+    const next = new Date(d);
+    next.setDate(next.getDate() + 7);
+    return { latest: d, next };
+  }
+  const anchor = new Date(LAB_ANCHOR_YEAR, LAB_ANCHOR_MONTH, LAB_ANCHOR_DAY);
+  if (now < anchor) return { latest: null, next: anchor };
+  let k = (now.getFullYear() - LAB_ANCHOR_YEAR) * 12 + (now.getMonth() - LAB_ANCHOR_MONTH);
+  if (new Date(LAB_ANCHOR_YEAR, LAB_ANCHOR_MONTH + k, LAB_ANCHOR_DAY) > now) k -= 1;
+  return {
+    latest: new Date(LAB_ANCHOR_YEAR, LAB_ANCHOR_MONTH + k, LAB_ANCHOR_DAY),
+    next: new Date(LAB_ANCHOR_YEAR, LAB_ANCHOR_MONTH + k + 1, LAB_ANCHOR_DAY),
+  };
+}
+function labTaskState(task, check, now) {
+  const sch = labSchedule(task, now);
+  if (!sch) return { timed: false, due: false };
+  const doneAt = check && check.doneAt ? new Date(check.doneAt) : null;
+  const due = !!sch.latest && (!doneAt || doneAt < sch.latest);
+  return { timed: true, due, next: sch.next };
+}
 
 const ITEMS_KEY = "dental-inv-items-v2";
 const FLAGS_KEY = "dental-inv-active-flags-v1";
@@ -880,6 +940,8 @@ export default function DentalInventoryApp() {
   const [roomAuditStatus, setRoomAuditStatus] = useState(null); // { [room]: { [checklistItemId]: {status, updatedAt, updatedBy} } }
   const [personalStock, setPersonalStock] = useState({}); // { [room]: { [itemId]: {name,category,count,...} } }
   const [personalRoom, setPersonalRoom] = useState(null);
+  const [labChecks, setLabChecks] = useState({}); // { [taskId]: { doneAt, doneBy } }
+  const [labNow, setLabNow] = useState(() => new Date());
   const [sharpsBins, setSharpsBins] = useState({}); // { [room]: { status, updatedAt, updatedBy } }
   const [auditRoom, setAuditRoom] = useState(null); // which room's audit page is open right now
   const [myRoom, setMyRoomState] = useState(null);
@@ -1124,6 +1186,19 @@ export default function DentalInventoryApp() {
       () => {}
     );
 
+    const unsubLab = onSnapshot(
+      query(collection(db, "labChecks")),
+      (snap) => {
+        const byId = {};
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          byId[data.id] = { doneAt: data.doneAt, doneBy: data.doneBy || "" };
+        });
+        setLabChecks(byId);
+      },
+      () => {}
+    );
+
     const unsubSharps = onSnapshot(
       query(collection(db, "sharpsBins")),
       (snap) => {
@@ -1191,6 +1266,7 @@ export default function DentalInventoryApp() {
       unsubRoomSettings();
       unsubPersonalStock();
       unsubSharps();
+      unsubLab();
       unsubEndo();
       unsubExclusions();
       unsubRoomAuditStatus();
@@ -1569,6 +1645,36 @@ export default function DentalInventoryApp() {
     },
     [personalStockError]
   );
+
+  useEffect(() => {
+    const t = setInterval(() => setLabNow(new Date()), 60000);
+    return () => clearInterval(t);
+  }, []);
+  const labDue = useMemo(
+    () => LAB_TASKS.filter((t) => labTaskState(t, labChecks[t.id], labNow).due),
+    [labChecks, labNow]
+  );
+  const markLabDone = useCallback((task, staff) => {
+    const now = new Date().toISOString();
+    const evt = {
+      id: `h_${Date.now()}_${Math.round(Math.random() * 9999)}`,
+      itemId: null,
+      room: "Lab",
+      action: "lab_check",
+      taskName: `${task.group === "cerec" ? "CEREC: " : "Endo: "}${task.name}`,
+      staff: staff || "",
+      date: now,
+    };
+    setDoc(doc(collection(db, "flagHistoryEvents"), evt.id), evt).catch(() => {});
+    setDoc(doc(db, "labChecks", task.id), { id: task.id, doneAt: now, doneBy: staff || "" }).catch((e) => {
+      const denied = e && e.code === "permission-denied";
+      setSaveError(
+        denied
+          ? "The Lab checklist needs the updated Firestore rules -- publish firestore.rules in the Firebase console."
+          : "Couldn't save -- check your connection."
+      );
+    });
+  }, []);
 
   // Sharps bin per room: "full" or "clear". Each change is also logged so it
   // shows up in the dashboard's recent activity.
@@ -1974,7 +2080,7 @@ export default function DentalInventoryApp() {
   }
 
   return (
-    <Shell view={view} setView={setView} saveError={saveError} openAlerts={openAlerts} onResolveAlert={resolveUrgentAlert} myName={myName}>
+    <Shell view={view} setView={setView} saveError={saveError} openAlerts={openAlerts} onResolveAlert={resolveUrgentAlert} myName={myName} labDueCount={labDue.length}>
       {view === "dashboard" && (
         <Dashboard
           items={items}
@@ -1987,6 +2093,7 @@ export default function DentalInventoryApp() {
             setView("audit-room");
           }}
           personalStock={personalStock}
+          labDue={labDue}
           sharpsBins={sharpsBins}
           onSetSharps={setSharpsStatus}
           onUsePersonal={recordPersonalUse}
@@ -2032,6 +2139,16 @@ export default function DentalInventoryApp() {
             setAuditRoom(room);
             setView("audit-room");
           }}
+        />
+      )}
+      {view === "lab" && (
+        <LabPage
+          labChecks={labChecks}
+          now={labNow}
+          myName={myName}
+          setMyName={setMyName}
+          onDone={markLabDone}
+          onOpenEndo={() => setView("endo-trolley")}
         />
       )}
       {view === "endo-trolley" && (
@@ -2108,13 +2225,14 @@ export default function DentalInventoryApp() {
 /* ============================================================================
    SHELL / NAV
 ============================================================================ */
-function Shell({ view, setView, saveError, openAlerts, onResolveAlert, myName, children }) {
+function Shell({ view, setView, saveError, openAlerts, onResolveAlert, myName, labDueCount, children }) {
   const todayNav = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "report", label: "Report / alert", icon: Flag },
     { id: "rooms", label: "By room", icon: Building2 },
   ];
   const moreNav = [
+    { id: "lab", label: "Lab", icon: FlaskConical, badge: labDueCount },
     { id: "trends", label: "Trends", icon: TrendingUp },
     { id: "catalogue", label: "Catalogue", icon: BookOpen },
     { id: "orders", label: "Order Requests", icon: ShoppingCart },
@@ -2174,6 +2292,7 @@ function Shell({ view, setView, saveError, openAlerts, onResolveAlert, myName, c
           <button className="di-nav-more-toggle" onClick={() => setMoreOpen(!moreOpen)}>
             {moreOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
             <span>More</span>
+            {!moreOpen && labDueCount > 0 && <span className="di-nav-badge">{labDueCount}</span>}
           </button>
           {moreOpen &&
             moreNav.map((n) => {
@@ -2187,6 +2306,7 @@ function Shell({ view, setView, saveError, openAlerts, onResolveAlert, myName, c
                 >
                   <Icon size={15} strokeWidth={2} />
                   <span>{n.label}</span>
+                  {n.badge > 0 && <span className="di-nav-badge">{n.badge}</span>}
                 </button>
               );
             })}
@@ -2480,6 +2600,7 @@ function RoomSheet({
   onOpenPersonal,
   sharpsBins,
   onSetSharps,
+  onOpenLab,
   onClose,
 }) {
   const settings = (roomSettings && roomSettings[room]) || { color: "", name: "" };
@@ -2809,6 +2930,13 @@ function RoomSheet({
         </div>
 
 
+        {room === "Lab" && (
+          <div className="di-sheet-cta-wrap">
+            <button className="di-small-btn di-sheet-cta" onClick={onOpenLab}>
+              <FlaskConical size={14} /> Lab checklist
+            </button>
+          </div>
+        )}
         {room === "Sterilisation" && (
           <div className="di-sheet-cta-wrap">
             <button className="di-small-btn di-sheet-cta" onClick={onOpenEndo}>
@@ -2873,6 +3001,8 @@ function describeActivity(h, itemsById) {
       return { text: `Endo trolley: ${h.sectionName || "a section"} is ${h.level === "out" ? "out" : "low"}`, tone: "red" };
     case "sharps_status":
       return { text: `${who} set the sharps bin to ${h.status === "full" ? "full" : "clear"}`, tone: h.status === "full" ? "red" : "green" };
+    case "lab_check":
+      return { text: `${who} completed ${h.taskName || "a lab task"}`, tone: "green" };
     case "personal_used":
       return { text: `${who} used ${h.itemName || "an item"}`, tone: "neutral" };
     default:
@@ -3235,7 +3365,7 @@ function HalloweenDecor() {
   );
 }
 
-function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, roomAudits, openOrders, missingAuditItems, openAlerts, roomsAffected, myRoom, myName, setView, onToggle, onSetItemStatus, onSetCustomStatus, onRebuildFlags, onOpenAudit, roomSettings, onSetRoomSetting, personalStock, onUsePersonal, onOpenPersonal, sharpsBins, onSetSharps }) {
+function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, roomAudits, openOrders, missingAuditItems, openAlerts, roomsAffected, myRoom, myName, setView, onToggle, onSetItemStatus, onSetCustomStatus, onRebuildFlags, onOpenAudit, roomSettings, onSetRoomSetting, personalStock, onUsePersonal, onOpenPersonal, sharpsBins, onSetSharps, labDue }) {
   const [openRoom, setOpenRoom] = useState(null);
   const [listOpen, setListOpen] = useState(false);
   const [cheerMsg, setCheerMsg] = useState(null);
@@ -3347,6 +3477,16 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
         </div>
       )}
 
+      {labDue && labDue.length > 0 && (
+        <button className="di-lab-banner" onClick={() => setView("lab")}>
+          <FlaskConical size={16} />
+          <span>
+            <strong>Lab to do:</strong> {labDue.map((t) => t.name).join(" · ")}
+          </span>
+          <ChevronRight size={14} />
+        </button>
+      )}
+
       <FloorMap
         flagsByRoom={flagsByRoom}
         missingByRoom={missingByRoom}
@@ -3389,6 +3529,10 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
           personalStock={personalStock}
           sharpsBins={sharpsBins}
           onSetSharps={onSetSharps}
+          onOpenLab={() => {
+            setOpenRoom(null);
+            setView("lab");
+          }}
           onUsePersonal={onUsePersonal}
           onOpenPersonal={(r) => {
             setOpenRoom(null);
@@ -4180,6 +4324,119 @@ function AuditSection({ section, sectionItems, roomStatus, onSetStatus, onRemove
 /* ============================================================================
    ENDO TROLLEY -- two trays of file-size sections, each Full / Low / Out
 ============================================================================ */
+const LAB_ICONS = { water: Droplets, clean: Sparkles, filter: Waves, battery: BatteryCharging, box: Package };
+const LAB_GROUP_ICONS = { cerec: Cpu, endo: Stethoscope };
+
+function LabPage({ labChecks, now, myName, setMyName, onDone, onOpenEndo }) {
+  const [staff, setStaff] = useState("");
+  useEffect(() => {
+    if (myName) setStaff(myName);
+  }, [myName]);
+  const fmt = (d) => d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" });
+
+  // done / due / upcoming for every task
+  const stateOf = (t) => {
+    const check = labChecks[t.id];
+    const st = labTaskState(t, check, now);
+    if (!st.timed) return { ...st, key: check ? "done" : "due", check };
+    if (st.due) return { ...st, key: "due", check };
+    const sch = labSchedule(t, now);
+    return { ...st, key: sch && sch.latest ? "done" : "upcoming", check };
+  };
+  const all = LAB_TASKS.map((t) => ({ t, ...stateOf(t) }));
+  const activeAll = all.filter((r) => r.key !== "upcoming");
+  const doneAll = activeAll.filter((r) => r.key === "done").length;
+  const allDone = activeAll.length > 0 && doneAll === activeAll.length;
+
+  return (
+    <div className="di-page">
+      <PageHeader
+        eyebrow="Lab"
+        title="Lab checklist"
+        sub="Regular jobs for the CEREC machine and the endo trolley. Daily jobs reset every morning."
+      />
+
+      <div className={`di-lab-hero${allDone ? " is-done" : ""}`}>
+        <div className="di-lab-hero-icon">{allDone ? <Sparkles size={22} /> : <FlaskConical size={22} />}</div>
+        <div className="di-lab-hero-text">
+          <div className="di-lab-hero-title">{allDone ? "Lab is all sorted" : `${doneAll} of ${activeAll.length} jobs done`}</div>
+          <div className="di-lab-bar">
+            <i style={{ width: `${activeAll.length ? (doneAll / activeAll.length) * 100 : 0}%` }} />
+          </div>
+        </div>
+        <div className="di-field di-lab-name-field">
+          <label>Your name</label>
+          <input
+            placeholder="optional"
+            value={staff}
+            onChange={(e) => setStaff(e.target.value)}
+            onBlur={() => staff && staff !== myName && setMyName(staff)}
+          />
+        </div>
+      </div>
+
+      {LAB_GROUPS.map((g) => {
+        const rows = all.filter((r) => r.t.group === g.id);
+        const act = rows.filter((r) => r.key !== "upcoming");
+        const GIcon = LAB_GROUP_ICONS[g.id] || FlaskConical;
+        const gd = act.filter((r) => r.key === "done").length;
+        return (
+          <div key={g.id} className={`di-panel di-lab-card is-${g.id}`}>
+            <div className="di-lab-card-head">
+              <span className="di-lab-card-icon">
+                <GIcon size={18} />
+              </span>
+              <h3>{g.title}</h3>
+              <span className={`di-lab-count${act.length > 0 && gd === act.length ? " is-all" : ""}`}>
+                {act.length > 0 && gd === act.length ? "All done" : `${gd} / ${act.length}`}
+              </span>
+            </div>
+            <ul className="di-lab-list">
+              {rows.map(({ t, key, check, next }) => {
+                const Icon = LAB_ICONS[t.icon] || CircleCheck;
+                return (
+                  <li key={t.id} className={`di-lab-row is-${key}`}>
+                    <span className={`di-lab-tile tone-${t.icon}`}>
+                      <Icon size={20} />
+                      {key === "done" && (
+                        <span className="di-lab-tick">
+                          <CircleCheck size={14} />
+                        </span>
+                      )}
+                    </span>
+                    <div className="di-lab-main">
+                      <div className="di-lab-name">
+                        {t.name}
+                        {key === "due" && <span className="di-lab-pill">Due</span>}
+                        {key === "upcoming" && <span className="di-lab-pill is-soft">Starts {fmt(next)}</span>}
+                      </div>
+                      <div className="di-cell-sub">
+                        {t.repeatLabel ? `${t.repeatLabel} · ` : ""}
+                        {check && check.doneAt
+                          ? `last done ${timeAgo(check.doneAt)}${check.doneBy ? ` by ${check.doneBy}` : ""}`
+                          : "not done yet"}
+                        {key === "done" && next ? ` · next ${fmt(next)}` : ""}
+                      </div>
+                    </div>
+                    {t.link && (
+                      <button className="di-small-btn di-small-btn-ghost" onClick={onOpenEndo}>
+                        <Package size={13} /> {t.link.label}
+                      </button>
+                    )}
+                    <button className={`di-lab-btn${key === "done" ? " is-done" : ""}`} onClick={() => onDone(t, staff)}>
+                      <CircleCheck size={14} /> {key === "done" ? "Done" : t.schedule ? "Mark done" : "Mark checked"}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function PersonalStock({ room, items, stock, myName, setMyName, onAdd, onSetCount, onUse, onRemove, onBack }) {
   const [staff, setStaff] = useState("");
   const [q, setQ] = useState("");
@@ -5745,6 +6002,44 @@ const CSS = `
 .di-sheet { position: relative; }
 .di-sheet-head, .di-sheet-stats { position: relative; z-index: 1; }
 .di-edit-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 12px; }
+.di-lab-hero { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 16px 18px; margin-bottom: 18px; border-radius: 18px; background: linear-gradient(135deg, #EEF3FA 0%, #F3EEF8 100%); border: 1px solid #E1E6F0; }
+.di-lab-hero.is-done { background: linear-gradient(135deg, #E9F3EA 0%, #EEF6E6 100%); border-color: #CFE3CF; }
+.di-lab-hero-icon { width: 44px; height: 44px; border-radius: 14px; display: grid; place-items: center; background: #fff; color: #5B6FA8; box-shadow: 0 2px 8px rgba(60,80,140,.12); }
+.di-lab-hero.is-done .di-lab-hero-icon { color: var(--green); }
+.di-lab-hero-text { flex: 1; min-width: 180px; }
+.di-lab-hero-title { font-weight: 700; font-size: 15px; margin-bottom: 8px; }
+.di-lab-bar { height: 8px; border-radius: 99px; background: rgba(255,255,255,.8); overflow: hidden; }
+.di-lab-bar i { display: block; height: 100%; border-radius: 99px; background: linear-gradient(90deg, #7C93D1, #6B8A66); transition: width .4s ease; }
+.di-lab-name-field { width: 130px; margin: 0; }
+.di-lab-card { padding: 16px 18px 6px; }
+.di-lab-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.di-lab-card-head h3 { margin: 0; flex: 1; font-size: 15px; }
+.di-lab-card-icon { width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center; }
+.di-lab-card.is-cerec .di-lab-card-icon { background: #E4ECFA; color: #4F6CB0; }
+.di-lab-card.is-endo .di-lab-card-icon { background: #F1E6F6; color: #8A5AA3; }
+.di-lab-count { font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 99px; background: var(--paper); color: var(--ink-soft); }
+.di-lab-count.is-all { background: #E1F0E1; color: var(--green); }
+.di-lab-list { list-style: none; margin: 0; padding: 0; }
+.di-lab-row { display: flex; align-items: center; gap: 12px; padding: 12px 10px; margin: 0 -10px 4px; border-radius: 14px; flex-wrap: wrap; transition: background .2s; }
+.di-lab-row.is-due { background: #FBF3E3; }
+.di-lab-row.is-done { background: #F1F7F0; }
+.di-lab-row.is-upcoming { opacity: .75; }
+.di-lab-tile { position: relative; width: 42px; height: 42px; flex-shrink: 0; border-radius: 13px; display: grid; place-items: center; }
+.di-lab-tile.tone-water { background: #DDEEFB; color: #3F86C6; }
+.di-lab-tile.tone-clean { background: #F1E6F6; color: #9A62B5; }
+.di-lab-tile.tone-filter { background: #D9F0EE; color: #3B9B93; }
+.di-lab-tile.tone-battery { background: #FCEBCB; color: #C58A1E; }
+.di-lab-tile.tone-box { background: #E3EFDD; color: #5E8A55; }
+.di-lab-tick { position: absolute; right: -5px; bottom: -5px; width: 18px; height: 18px; border-radius: 50%; background: #fff; color: var(--green); display: grid; place-items: center; box-shadow: 0 1px 3px rgba(0,0,0,.18); }
+.di-lab-main { flex: 1; min-width: 170px; }
+.di-lab-name { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.di-lab-pill { background: #F6D9D2; color: #A8402B; border-radius: 999px; font-size: 11px; font-weight: 700; padding: 1px 9px; }
+.di-lab-pill.is-soft { background: var(--paper); color: var(--ink-soft); }
+.di-lab-btn { display: inline-flex; align-items: center; gap: 6px; border: none; border-radius: 99px; padding: 8px 14px; font-size: 12.5px; font-weight: 700; font-family: inherit; cursor: pointer; background: var(--ink); color: #fff; }
+.di-lab-btn.is-done { background: #fff; color: var(--green); box-shadow: inset 0 0 0 1.5px #BBD6BB; }
+.di-lab-banner { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 11px 14px; margin-bottom: 14px; border: 1px solid #E9D3A6; background: #FBF1DC; color: var(--ink); border-radius: 14px; font-size: 13.5px; cursor: pointer; font-family: inherit; }
+.di-lab-banner span { flex: 1; }
+.di-nav-badge { margin-left: auto; background: var(--red); color: #fff; border-radius: 999px; font-size: 10.5px; font-weight: 700; min-width: 18px; text-align: center; padding: 1px 6px; }
 .di-sheet-corner { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
 .di-sharps { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
 .di-sharps.is-full { background: #FBE6E3; border-color: #E9B7B0; }
