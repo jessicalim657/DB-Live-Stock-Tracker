@@ -381,13 +381,44 @@ const ORDER_TYPES = ["Take-Home Gels", "In Chair"];
 const mkChecklistItem = (name) => ({ id: slugify(name), name });
 const DEFAULT_AUDIT_CHECKLIST = {
   "Room Items": [
-    "SD card reader", "Microetcher", "Headphones", "Web cam", "Bib chain",
+    "SD card reader", "Microetcher", "Headphones", "Web cam", "Mouth watch camera", "Bib chain",
     "Curing lights x2", "Retractors", "Occlusal mirror", "Contrasters - black",
     "Shade tabs", "DB mirror", "Light shield", "1x Dark glasses", "1x DA glasses",
-    "Composite gun", "Light/heavy body gun",
+    "Composite gun", "Protemp gun", "Light body gun",
     "Discovery sheets", "TCA + bicarb", "Pens", "DB pricing packs",
   ].map(mkChecklistItem),
 };
+
+// One-off edit to the LIVE checklist (the stored copy in Firestore wins over
+// the defaults above, so changing the defaults alone wouldn't reach the
+// clinic). Adds "Mouth watch camera" after "Web cam" and swaps the old
+// "Light/heavy body gun" for "Protemp gun" + "Light body gun". It runs once
+// -- the id is recorded on the stored document -- so if someone later removes
+// one of these items on purpose, it stays removed.
+const AUDIT_MIGRATION_ID = "2026-11-camera-guns";
+function applyAuditMigration(list) {
+  const items = list["Room Items"] || [];
+  // matches the stored id, or any spelling like "Heavy/light body gun"
+  const isOld = (i) => i.id === slugify("Light/heavy body gun") || (/heavy/i.test(i.name) && /light/i.test(i.name) && /gun/i.test(i.name));
+  const camera = mkChecklistItem("Mouth watch camera");
+  const protemp = mkChecklistItem("Protemp gun");
+  const lightBody = mkChecklistItem("Light body gun");
+  const present = new Set(items.map((i) => i.id));
+  const next = [];
+  items.forEach((i) => {
+    if (isOld(i)) {
+      if (!present.has(protemp.id)) next.push(protemp);
+      if (!present.has(lightBody.id)) next.push(lightBody);
+    } else {
+      next.push(i);
+    }
+    if (i.id === slugify("Web cam") && !present.has(camera.id)) next.push(camera);
+  });
+  [camera, protemp, lightBody].forEach((it) => {
+    if (!next.some((i) => i.id === it.id)) next.push(it);
+  });
+  return { list: { ...list, "Room Items": next }, removedIds: items.filter(isOld).map((i) => i.id) };
+}
 
 // Rooms that keep their own private stock counts (separate from the shared
 // low-stock flags). Add a room name here to give it the same feature.
@@ -1104,12 +1135,27 @@ export default function DentalInventoryApp() {
           Object.values(raw).every(
             (arr) => Array.isArray(arr) && arr.every((item) => item && typeof item === "object" && "name" in item)
           );
-        if (isCurrentShape) {
+        const migrationsDone = (snap.exists() && snap.data().migrations) || [];
+        if (isCurrentShape && !migrationsDone.includes(AUDIT_MIGRATION_ID)) {
+          const { list: migrated, removedIds } = applyAuditMigration(raw);
+          setAuditChecklist(migrated);
+          try {
+            await setDoc(auditChecklistRef, { list: migrated, migrations: [...migrationsDone, AUDIT_MIGRATION_ID] }, { merge: true });
+            // the swapped-out item's old ticks/crosses shouldn't linger
+            removedIds.forEach((rid) => {
+              ROOMS.forEach((room) => {
+                deleteDoc(doc(db, "roomAuditStatus", `${room}::${rid}`)).catch(() => {});
+              });
+            });
+          } catch (e) {
+            setSaveError("Couldn't save -- check your connection.");
+          }
+        } else if (isCurrentShape) {
           setAuditChecklist(raw);
         } else {
           setAuditChecklist(DEFAULT_AUDIT_CHECKLIST);
           try {
-            await setDoc(auditChecklistRef, { list: DEFAULT_AUDIT_CHECKLIST });
+            await setDoc(auditChecklistRef, { list: DEFAULT_AUDIT_CHECKLIST, migrations: [AUDIT_MIGRATION_ID] });
           } catch (e) {
             setSaveError("Couldn't reach the database -- check firebase.js is filled in.");
           }
@@ -1405,7 +1451,7 @@ export default function DentalInventoryApp() {
   const persistAuditChecklist = useCallback(async (next) => {
     setAuditChecklist(next);
     try {
-      await setDoc(doc(db, "dentalBoutique", "auditChecklist"), { list: next });
+      await setDoc(doc(db, "dentalBoutique", "auditChecklist"), { list: next }, { merge: true });
       setSaveError("");
     } catch (e) {
       setSaveError("Couldn't save -- check your connection.");
@@ -2383,7 +2429,7 @@ const colorHexFor = (roomSettings, room) => {
 
 // One tile per room, coloured by what's going on in it right now. Tapping a
 // tile opens that room's full picture (RoomSheet below).
-function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, roomSettings, popRoom, halloween, onOpenRoom }) {
+function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, roomSettings, popRoom, halloween, onOpenRoom, auditedToday, auditView, onToggleAuditView }) {
   const auditByRoom = {};
   roomAudits.forEach(({ room, audit }) => (auditByRoom[room] = audit));
 
@@ -2403,7 +2449,9 @@ function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, 
     return (
       <button
         key={room}
-        className={`di-tile is-${st} is-${variant}${myRoom === room ? " is-mine" : ""}${popRoom === room ? " is-pop" : ""}`}
+        className={`di-tile is-${st} is-${variant}${myRoom === room ? " is-mine" : ""}${popRoom === room ? " is-pop" : ""}${
+          auditView ? (!TREATMENT_ROOMS.includes(room) ? " is-na" : auditedToday.has(room) ? " is-audited" : " is-unaudited") : ""
+        }`}
         style={area}
         onClick={() => onOpenRoom(room)}
         aria-label={`${room}: ${st === "ok" ? "all good" : st}`}
@@ -2428,6 +2476,11 @@ function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, 
         {halloween && (st === "flag" || st === "urgent") && (
           <span className="di-tile-web">
             <Cobweb size={variant === "room" ? 30 : 48} />
+          </span>
+        )}
+        {auditView && TREATMENT_ROOMS.includes(room) && (
+          <span className={`di-tile-audit ${auditedToday.has(room) ? "is-yes" : "is-no"}`}>
+            {auditedToday.has(room) ? <CircleCheck size={13} /> : <ClipboardEdit size={12} />}
           </span>
         )}
         {myRoom === room && <span className="di-tile-here">you're here</span>}
@@ -2460,7 +2513,12 @@ function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, 
       )}
       <div className="di-panel-head">
         <h3>Clinic floor</h3>
-        <span className="di-hint-inline">Tap a room</span>
+        <span className="di-map-tools">
+          <button className={`di-chip-toggle${auditView ? " is-on" : ""}`} onClick={onToggleAuditView} aria-pressed={!!auditView}>
+            <ClipboardEdit size={13} /> {auditView ? "Showing audits" : "Show un-audited"}
+          </button>
+          <span className="di-hint-inline">Tap a room</span>
+        </span>
       </div>
       <div className="di-u">
         {renderTile("Sterilisation", "steri", { gridColumn: "2 / 6", gridRow: "15 / 37" })}
@@ -2478,12 +2536,61 @@ function FloorMap({ flagsByRoom, missingByRoom, alertRooms, roomAudits, myRoom, 
         ))}
         {renderTile("Lab", "lab", { gridColumn: "2 / 6", gridRow: 39 })}
       </div>
+      {auditView ? (
+        <div className="di-legend">
+          <span><i className="di-legend-dot" style={{ background: "var(--green)" }} /> Audited today</span>
+          <span><i className="di-legend-dot" style={{ background: "#D9A441" }} /> Not audited yet</span>
+          <span><i className="di-legend-dot" style={{ background: "#D8D5CD" }} /> Not part of the daily audit</span>
+        </div>
+      ) : (
       <div className="di-legend">
         <span><i className="di-legend-dot" style={{ background: "var(--green)" }} /> All good</span>
         <span><i className="di-legend-dot" style={{ background: "var(--red)" }} /> Low stock</span>
         <span><i className="di-legend-dot" style={{ background: "var(--clay)" }} /> Item missing</span>
         <span><i className="di-legend-dot" style={{ background: "#B3261E" }} /> Urgent alert</span>
       </div>
+      )}
+    </div>
+  );
+}
+
+// Daily audit goal: every treatment room (not Steri or Lab) audited today.
+function AuditProgress({ auditedToday, onOpenAudit, auditView, onToggleAuditView }) {
+  const total = TREATMENT_ROOMS.length;
+  const done = TREATMENT_ROOMS.filter((r) => auditedToday.has(r)).length;
+  const remaining = TREATMENT_ROOMS.filter((r) => !auditedToday.has(r));
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  const complete = total > 0 && done === total;
+  return (
+    <div className={`di-panel di-auditgoal${complete ? " is-complete" : ""}`}>
+      <div className="di-auditgoal-head">
+        <span className="di-auditgoal-ico">{complete ? <Sparkles size={18} /> : <ClipboardEdit size={18} />}</span>
+        <div className="di-auditgoal-title">
+          <h3>Today's audits</h3>
+          <div className="di-cell-sub">{complete ? "Every room audited today. Lovely work!" : "Goal: every treatment room audited, every day"}</div>
+        </div>
+        <div className="di-auditgoal-count">
+          <b>{done}</b>
+          <span> / {total}</span>
+        </div>
+      </div>
+      <div className="di-auditgoal-bar" role="progressbar" aria-valuenow={done} aria-valuemin={0} aria-valuemax={total}>
+        <i style={{ width: `${pct}%` }} />
+        <span>{pct}%</span>
+      </div>
+      {!complete && (
+        <div className="di-auditgoal-rest">
+          <span className="di-auditgoal-restlabel">Still to audit</span>
+          {remaining.map((r) => (
+            <button key={r} className="di-auditgoal-pill" onClick={() => onOpenAudit(r)}>
+              {r.slice(5)}
+            </button>
+          ))}
+          <button className={`di-chip-toggle${auditView ? " is-on" : ""}`} onClick={onToggleAuditView}>
+            {auditView ? "Hide on map" : "Show on map"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -3375,6 +3482,18 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
   const cheerTimer = useRef(null);
   const toothTimer = useRef(null);
   const [confirmingRebuild, setConfirmingRebuild] = useState(false);
+  const [auditView, setAuditView] = useState(false);
+  const [, setDayTick] = useState(0);
+  useEffect(() => {
+    // re-check every few minutes so the bar resets after midnight
+    const t = setInterval(() => setDayTick((n) => n + 1), 300000);
+    return () => clearInterval(t);
+  }, []);
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const auditedToday = new Set(
+    history.filter((h) => h.action === "audited" && new Date(h.date) >= todayStart).map((h) => h.room)
+  );
   const [rebuildResult, setRebuildResult] = useState(null); // null | { count: number }
 
   const sorted = [...activeFlags].sort((a, b) => new Date(a.flaggedAt) - new Date(b.flaggedAt));
@@ -3488,7 +3607,17 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
         </button>
       )}
 
+      <AuditProgress
+        auditedToday={auditedToday}
+        onOpenAudit={onOpenAudit}
+        auditView={auditView}
+        onToggleAuditView={() => setAuditView((v) => !v)}
+      />
+
       <FloorMap
+        auditedToday={auditedToday}
+        auditView={auditView}
+        onToggleAuditView={() => setAuditView((v) => !v)}
         flagsByRoom={flagsByRoom}
         missingByRoom={missingByRoom}
         alertRooms={alertRooms}
@@ -4695,39 +4824,39 @@ function buildTrendsSummary(items, history, now) {
   const resolved = history.filter((h) => h.action === "resolved");
   const thisWk = flagged.filter((h) => within(h, 7, 0)).length;
   const lastWk = flagged.filter((h) => within(h, 14, 7)).length;
-  const restockedWk = resolved.filter((h) => within(h, 7, 0)).length;
-  const rows = [];
+  const restocked = resolved.filter((h) => within(h, 7, 0)).length;
 
-  // 1. Flags this week vs last
-  let flagText;
-  let flagTone = "neutral";
-  if (thisWk === 0 && lastWk === 0) flagText = "No flags in the last two weeks";
-  else if (lastWk === 0) {
-    flagText = `${thisWk} flag${thisWk === 1 ? "" : "s"} this week, none the week before`;
-    flagTone = "red";
-  } else if (thisWk === lastWk) flagText = `Flags are steady at ${thisWk} this week, same as last week`;
-  else {
+  // Hero: this week vs last week
+  let big;
+  let headline;
+  let tone = "neutral";
+  if (thisWk === 0 && lastWk === 0) {
+    big = "Quiet";
+    headline = "No flags in the last two weeks";
+  } else if (lastWk === 0) {
+    big = `${thisWk} new`;
+    headline = "Flags this week, none the week before";
+    tone = "red";
+  } else if (thisWk === lastWk) {
+    big = "Steady";
+    headline = "Same number of flags as last week";
+  } else {
     const pct = Math.round((Math.abs(thisWk - lastWk) / lastWk) * 100);
     const down = thisWk < lastWk;
-    flagText = `Flags are ${down ? "down" : "up"} ${pct}% on last week (${thisWk} vs ${lastWk})`;
-    flagTone = down ? "green" : "red";
+    big = `${down ? "↓" : "↑"} ${pct}%`;
+    headline = `Flags ${down ? "down" : "up"} on last week`;
+    tone = down ? "green" : "red";
   }
-  rows.push({ tone: flagTone, text: flagText, kind: "flags" });
+  const gap = thisWk - restocked;
+  const pace =
+    thisWk === 0 && restocked === 0
+      ? ""
+      : gap <= 0
+      ? `${restocked} restocked, keeping pace`
+      : `${restocked} restocked, ${gap} still to catch up`;
+  const hero = { big, headline, tone, thisWk, lastWk, pace };
 
-  // 2. Keeping pace
-  if (thisWk > 0 || restockedWk > 0) {
-    const gap = thisWk - restockedWk;
-    rows.push({
-      tone: gap <= 0 ? "green" : "clay",
-      text:
-        gap <= 0
-          ? `${restockedWk} restocked this week, keeping pace with what's flagged`
-          : `${restockedWk} restocked vs ${thisWk} flagged this week, ${gap} still to catch up`,
-      kind: "pace",
-    });
-  }
-
-  // 3. Busiest room, last 30 days
+  // Tiles: standouts over the last 30 days
   const month = flagged.filter((h) => within(h, 30, 0));
   const count = (arr, keyFn) => {
     const m = {};
@@ -4737,64 +4866,77 @@ function buildTrendsSummary(items, history, now) {
     });
     return Object.entries(m).sort((a, b) => b[1] - a[1]);
   };
+  const times = (n) => `${n} time${n === 1 ? "" : "s"}`;
+  const tiles = [];
   const rooms = count(month, (h) => h.room);
-  if (rooms.length) {
-    rows.push({ tone: "neutral", text: `${rooms[0][0]} had the most flags in the last 30 days (${rooms[0][1]})`, kind: "room" });
-  }
-
-  // 4. Top Sterilisation item, last 30 days
+  if (rooms.length) tiles.push({ kind: "room", label: "Busiest room", value: rooms[0][0], sub: `${rooms[0][1]} flags in 30 days` });
   const byId = {};
   items.forEach((i) => (byId[i.id] = i));
   const steri = count(month.filter((h) => h.room === "Sterilisation"), (h) => h.itemId);
   if (steri.length && byId[steri[0][0]]) {
-    rows.push({
-      tone: "neutral",
-      text: `${byId[steri[0][0]].name} ran low most often in Sterilisation this month (${steri[0][1]} time${steri[0][1] === 1 ? "" : "s"})`,
-      kind: "item",
-    });
+    tiles.push({ kind: "item", label: "Runs low most", value: byId[steri[0][0]].name, sub: `${times(steri[0][1])} in Sterilisation` });
   }
-
-  // 5. Instruments going missing, last 30 days
   const miss = count(history.filter((h) => h.action === "instrument_missing" && within(h, 30, 0)), (h) => h.instrumentName);
-  if (miss.length) {
-    rows.push({
-      tone: "clay",
-      text: `${miss[0][0]} went missing most often this month (${miss[0][1]} time${miss[0][1] === 1 ? "" : "s"})`,
-      kind: "missing",
-    });
-  }
-
-  // 6. Median restock time, last 30 days
+  if (miss.length) tiles.push({ kind: "missing", label: "Goes missing most", value: miss[0][0], sub: `${times(miss[0][1])} this month` });
   const recent = history.filter((h) => h.action === "flagged" || (h.action === "resolved" && within(h, 30, 0)));
   const rs = computeResolutionStats(recent);
   if (rs.overallMedian !== null && rs.overallMedian !== undefined) {
-    rows.push({ tone: "neutral", text: `Median time to restock this month: ${formatDuration(rs.overallMedian)}`, kind: "time" });
+    tiles.push({ kind: "time", label: "Time to restock", value: formatDuration(rs.overallMedian), sub: "median, last 30 days" });
   }
-  return rows;
+  return { hero, tiles };
 }
 
 function TrendsSummary({ items, history }) {
-  const rows = buildTrendsSummary(items, history, new Date());
-  const ICONS = { flags: Flag, pace: CircleCheck, room: Building2, item: Package, missing: Search, time: Clock };
+  const { hero, tiles } = buildTrendsSummary(items, history, new Date());
+  const ICONS = { room: Building2, item: Package, missing: Search, time: Clock };
+  const max = Math.max(hero.thisWk, hero.lastWk, 1);
   return (
-    <div className="di-panel di-tsum">
-      <div className="di-panel-head">
-        <h3>At a glance</h3>
-        <span className="di-hint-inline">Last 7 and 30 days</span>
+    <div className="di-glance">
+      <div className={`di-glance-hero is-${hero.tone}`}>
+        <div className="di-glance-main">
+          <div className="di-glance-eyebrow">This week</div>
+          <div className="di-glance-big">{hero.big}</div>
+          <div className="di-glance-head">{hero.headline}</div>
+          {hero.pace && (
+            <span className="di-glance-pace">
+              <CircleCheck size={13} /> {hero.pace}
+            </span>
+          )}
+        </div>
+        <div className="di-glance-bars">
+          <div className="di-glance-bar-row">
+            <span>This week</span>
+            <div className="di-glance-track">
+              <i className="is-now" style={{ width: `${(hero.thisWk / max) * 100}%` }} />
+            </div>
+            <b>{hero.thisWk}</b>
+          </div>
+          <div className="di-glance-bar-row">
+            <span>Last week</span>
+            <div className="di-glance-track">
+              <i className="is-prev" style={{ width: `${(hero.lastWk / max) * 100}%` }} />
+            </div>
+            <b>{hero.lastWk}</b>
+          </div>
+        </div>
       </div>
-      <ul className="di-tsum-list">
-        {rows.map((r, i) => {
-          const Icon = ICONS[r.kind] || Info;
-          return (
-            <li key={i} className={`di-tsum-row${i === 0 ? " is-lead" : ""}`}>
-              <span className={`di-tsum-ico is-${r.tone}`}>
-                <Icon size={i === 0 ? 18 : 15} />
-              </span>
-              <span>{r.text}</span>
-            </li>
-          );
-        })}
-      </ul>
+      {tiles.length > 0 && (
+        <div className="di-glance-tiles">
+          {tiles.map((x) => {
+            const Icon = ICONS[x.kind] || Info;
+            return (
+              <div key={x.kind} className={`di-glance-tile tone-${x.kind}`}>
+                <span className="di-glance-ico">
+                  <Icon size={18} />
+                </span>
+                <div className="di-glance-label">{x.label}</div>
+                <div className="di-glance-value">{x.value}</div>
+                <div className="di-cell-sub">{x.sub}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -6122,15 +6264,57 @@ const CSS = `
 .di-sheet { position: relative; }
 .di-sheet-head, .di-sheet-stats { position: relative; z-index: 1; }
 .di-edit-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 12px; }
-.di-tsum-list { list-style: none; margin: 0; padding: 0; }
-.di-tsum-row { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
-.di-tsum-row:last-child { border-bottom: none; }
-.di-tsum-row.is-lead { font-size: 16px; font-weight: 600; padding-top: 4px; padding-bottom: 12px; }
-.di-tsum-ico { width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center; flex-shrink: 0; background: var(--paper); color: var(--ink-soft); }
-.di-tsum-row.is-lead .di-tsum-ico { width: 38px; height: 38px; border-radius: 12px; }
-.di-tsum-ico.is-green { background: #E1F0E1; color: var(--green); }
-.di-tsum-ico.is-red { background: #F6D9D2; color: #A8402B; }
-.di-tsum-ico.is-clay { background: #F3E7D2; color: var(--clay); }
+.di-map-tools { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.di-chip-toggle { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: #fff; color: var(--ink-soft); border-radius: 99px; padding: 5px 12px; font-size: 12px; font-weight: 600; font-family: inherit; cursor: pointer; }
+.di-chip-toggle.is-on { background: #FBF1DC; border-color: #E6CB92; color: #8A6516; }
+.di-tile.is-na { opacity: .5; }
+.di-tile.is-audited { box-shadow: inset 0 0 0 2px #8DB88A; }
+.di-tile.is-unaudited { box-shadow: inset 0 0 0 2px #D9A441; background-image: repeating-linear-gradient(135deg, transparent 0 7px, rgba(217,164,65,.14) 7px 9px); }
+.di-tile-audit { position: absolute; left: 4px; bottom: 4px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.18); }
+.di-tile-audit.is-yes { color: var(--green); }
+.di-tile-audit.is-no { color: #B9801A; }
+.di-auditgoal { padding: 16px 18px 14px; margin-bottom: 16px; }
+.di-auditgoal.is-complete { background: linear-gradient(135deg, #E9F3EA 0%, #EEF6E6 100%); border-color: #CFE3CF; }
+.di-auditgoal-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.di-auditgoal-ico { width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center; background: #FBF1DC; color: #B9801A; flex-shrink: 0; }
+.di-auditgoal.is-complete .di-auditgoal-ico { background: #fff; color: var(--green); }
+.di-auditgoal-title { flex: 1; min-width: 0; }
+.di-auditgoal-title h3 { margin: 0 0 1px; font-size: 14.5px; }
+.di-auditgoal-count { font-size: 14px; color: var(--ink-soft); white-space: nowrap; }
+.di-auditgoal-count b { font-size: 24px; color: var(--ink); font-family: Georgia, "Fraunces", serif; }
+.di-auditgoal-bar { position: relative; height: 16px; border-radius: 99px; background: var(--paper); overflow: hidden; }
+.di-auditgoal-bar i { display: block; height: 100%; border-radius: 99px; background: linear-gradient(90deg, #E6C06A, #8DB88A); transition: width .5s ease; min-width: 0; }
+.di-auditgoal-bar span { position: absolute; inset: 0; display: grid; place-items: center; font-size: 10.5px; font-weight: 700; color: var(--ink); mix-blend-mode: multiply; }
+.di-auditgoal-rest { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+.di-auditgoal-restlabel { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-soft); margin-right: 2px; }
+.di-auditgoal-pill { min-width: 30px; height: 28px; padding: 0 8px; border-radius: 99px; border: 1px solid #E6CB92; background: #FBF1DC; color: #8A6516; font-weight: 700; font-size: 12.5px; font-family: inherit; cursor: pointer; }
+.di-glance { margin-bottom: 20px; }
+.di-glance-hero { display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; padding: 22px 24px; border-radius: 22px; background: linear-gradient(135deg, #F4EFE6 0%, #EEF1F7 100%); border: 1px solid #E6E2D8; margin-bottom: 12px; }
+.di-glance-hero.is-green { background: linear-gradient(135deg, #E7F2E6 0%, #EEF6EA 100%); border-color: #CFE2CD; }
+.di-glance-hero.is-red { background: linear-gradient(135deg, #FBEAE5 0%, #FBF1E6 100%); border-color: #EFD2C8; }
+.di-glance-main { min-width: 200px; }
+.di-glance-eyebrow { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 2px; }
+.di-glance-big { font-family: Georgia, "Fraunces", serif; font-size: 46px; line-height: 1.05; font-weight: 600; color: var(--ink); }
+.di-glance-hero.is-green .di-glance-big { color: #4C7448; }
+.di-glance-hero.is-red .di-glance-big { color: #B2503A; }
+.di-glance-head { font-size: 15px; font-weight: 600; margin: 4px 0 10px; }
+.di-glance-pace { display: inline-flex; align-items: center; gap: 6px; background: rgba(255,255,255,.75); border-radius: 99px; padding: 4px 12px; font-size: 12.5px; font-weight: 600; color: var(--ink-soft); }
+.di-glance-bars { flex: 1; min-width: 200px; max-width: 320px; display: flex; flex-direction: column; gap: 10px; }
+.di-glance-bar-row { display: grid; grid-template-columns: 72px 1fr 26px; align-items: center; gap: 10px; font-size: 12.5px; color: var(--ink-soft); }
+.di-glance-bar-row b { color: var(--ink); text-align: right; }
+.di-glance-track { height: 12px; border-radius: 99px; background: rgba(255,255,255,.8); overflow: hidden; }
+.di-glance-track i { display: block; height: 100%; border-radius: 99px; min-width: 4px; transition: width .5s ease; }
+.di-glance-track i.is-now { background: linear-gradient(90deg, #E39A83, #C0674F); }
+.di-glance-track i.is-prev { background: #CFC8B8; }
+.di-glance-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+.di-glance-tile { background: #fff; border: 1px solid var(--line); border-radius: 18px; padding: 14px 16px 15px; box-shadow: 0 1px 2px rgba(60,45,20,.04); }
+.di-glance-ico { width: 36px; height: 36px; border-radius: 12px; display: grid; place-items: center; margin-bottom: 10px; }
+.di-glance-tile.tone-room .di-glance-ico { background: #ECE4F6; color: #7C5AA6; }
+.di-glance-tile.tone-item .di-glance-ico { background: #E3EFDD; color: #5E8A55; }
+.di-glance-tile.tone-missing .di-glance-ico { background: #FCEBCB; color: #B9801A; }
+.di-glance-tile.tone-time .di-glance-ico { background: #DDEEFB; color: #3F86C6; }
+.di-glance-label { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-soft); }
+.di-glance-value { font-size: 17px; font-weight: 700; margin: 2px 0 2px; line-height: 1.25; overflow-wrap: anywhere; }
 .di-lab-hero { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 16px 18px; margin-bottom: 18px; border-radius: 18px; background: linear-gradient(135deg, #EEF3FA 0%, #F3EEF8 100%); border: 1px solid #E1E6F0; }
 .di-lab-hero.is-done { background: linear-gradient(135deg, #E9F3EA 0%, #EEF6E6 100%); border-color: #CFE3CF; }
 .di-lab-hero-icon { width: 44px; height: 44px; border-radius: 14px; display: grid; place-items: center; background: #fff; color: #5B6FA8; box-shadow: 0 2px 8px rgba(60,80,140,.12); }
