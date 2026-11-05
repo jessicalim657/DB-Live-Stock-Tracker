@@ -25,6 +25,8 @@ import {
   ClipboardList,
   Pencil,
   ChevronDown,
+  ExternalLink,
+  FileSpreadsheet,
   ChevronRight,
   Bell,
   Clock,
@@ -4454,11 +4456,16 @@ function AuditSection({ section, sectionItems, roomStatus, onSetStatus, onRemove
 /* ============================================================================
    ENDO TROLLEY -- two trays of file-size sections, each Full / Low / Out
 ============================================================================ */
+// Links tucked away in the dropdown at the bottom of the Lab page.
+const LAB_LINKS = [
+  { label: "Lab Google Sheet", url: "https://docs.google.com/spreadsheets/d/1tB6Op6rp_VI1Se5vQG5Fz6RO1TiasuQzvClkrzb7JNU/edit?gid=56375372#gid=56375372" },
+];
 const LAB_ICONS = { water: Droplets, clean: Sparkles, filter: Waves, battery: BatteryCharging, box: Package };
 const LAB_GROUP_ICONS = { cerec: Cpu, endo: Stethoscope };
 
 function LabPage({ labChecks, now, myName, setMyName, onDone, onOpenEndo }) {
   const [staff, setStaff] = useState("");
+  const [linksOpen, setLinksOpen] = useState(false);
   useEffect(() => {
     if (myName) setStaff(myName);
   }, [myName]);
@@ -4563,6 +4570,26 @@ function LabPage({ labChecks, now, myName, setMyName, onDone, onOpenEndo }) {
           </div>
         );
       })}
+
+      <div className="di-lab-links">
+        <button className={`di-lab-links-toggle${linksOpen ? " is-open" : ""}`} onClick={() => setLinksOpen((o) => !o)} aria-expanded={linksOpen}>
+          <FileSpreadsheet size={16} /> Lab sheets and links
+          <ChevronDown size={16} className="di-lab-chev" />
+        </button>
+        {linksOpen && (
+          <div className="di-lab-links-body">
+            {LAB_LINKS.map((l) => (
+              <a key={l.url} className="di-lab-link" href={l.url} target="_blank" rel="noopener noreferrer">
+                <span className="di-lab-link-ico">
+                  <FileSpreadsheet size={18} />
+                </span>
+                {l.label}
+                <ExternalLink size={15} className="di-lab-link-ext" />
+              </a>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -6315,6 +6342,16 @@ const CSS = `
 .di-glance-tile.tone-time .di-glance-ico { background: #DDEEFB; color: #3F86C6; }
 .di-glance-label { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-soft); }
 .di-glance-value { font-size: 17px; font-weight: 700; margin: 2px 0 2px; line-height: 1.25; overflow-wrap: anywhere; }
+.di-lab-links { margin-top: 4px; }
+.di-lab-links-toggle { display: flex; align-items: center; gap: 10px; width: 100%; border: 1px dashed var(--line); background: transparent; border-radius: 14px; padding: 11px 14px; font-family: inherit; font-size: 13px; font-weight: 600; color: var(--ink-soft); cursor: pointer; text-align: left; }
+.di-lab-links-toggle:hover { background: #fff; }
+.di-lab-links-toggle .di-lab-chev { margin-left: auto; transition: transform .2s ease; }
+.di-lab-links-toggle.is-open .di-lab-chev { transform: rotate(180deg); }
+.di-lab-links-body { display: flex; flex-direction: column; gap: 8px; padding: 10px 2px 0; }
+.di-lab-link { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 14px; background: #fff; border: 1px solid var(--line); color: var(--ink); text-decoration: none; font-size: 14px; font-weight: 600; }
+.di-lab-link:hover { box-shadow: 0 2px 8px rgba(60,45,20,.08); }
+.di-lab-link-ico { width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center; background: #E1F0E1; color: #3F8F55; flex-shrink: 0; }
+.di-lab-link-ext { margin-left: auto; color: var(--ink-soft); }
 .di-lab-hero { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 16px 18px; margin-bottom: 18px; border-radius: 18px; background: linear-gradient(135deg, #EEF3FA 0%, #F3EEF8 100%); border: 1px solid #E1E6F0; }
 .di-lab-hero.is-done { background: linear-gradient(135deg, #E9F3EA 0%, #EEF6E6 100%); border-color: #CFE3CF; }
 .di-lab-hero-icon { width: 44px; height: 44px; border-radius: 14px; display: grid; place-items: center; background: #fff; color: #5B6FA8; box-shadow: 0 2px 8px rgba(60,80,140,.12); }
