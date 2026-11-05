@@ -27,6 +27,7 @@ import {
   ChevronDown,
   ChevronRight,
   Bell,
+  Clock,
   FlaskConical,
   Droplets,
   Sparkles,
@@ -4681,6 +4682,123 @@ function EndoTrolley({ endoStatus, myName, setMyName, onSetStatus, onBack }) {
   );
 }
 
+// Plain-language highlights for the top of Trends: this week vs last week,
+// and the standout room / item / instrument over the last 30 days.
+function buildTrendsSummary(items, history, now) {
+  const DAY = 86400000;
+  const t = now.getTime();
+  const within = (h, from, to) => {
+    const x = new Date(h.date).getTime();
+    return x >= t - from * DAY && x < t - to * DAY;
+  };
+  const flagged = history.filter((h) => h.action === "flagged");
+  const resolved = history.filter((h) => h.action === "resolved");
+  const thisWk = flagged.filter((h) => within(h, 7, 0)).length;
+  const lastWk = flagged.filter((h) => within(h, 14, 7)).length;
+  const restockedWk = resolved.filter((h) => within(h, 7, 0)).length;
+  const rows = [];
+
+  // 1. Flags this week vs last
+  let flagText;
+  let flagTone = "neutral";
+  if (thisWk === 0 && lastWk === 0) flagText = "No flags in the last two weeks";
+  else if (lastWk === 0) {
+    flagText = `${thisWk} flag${thisWk === 1 ? "" : "s"} this week, none the week before`;
+    flagTone = "red";
+  } else if (thisWk === lastWk) flagText = `Flags are steady at ${thisWk} this week, same as last week`;
+  else {
+    const pct = Math.round((Math.abs(thisWk - lastWk) / lastWk) * 100);
+    const down = thisWk < lastWk;
+    flagText = `Flags are ${down ? "down" : "up"} ${pct}% on last week (${thisWk} vs ${lastWk})`;
+    flagTone = down ? "green" : "red";
+  }
+  rows.push({ tone: flagTone, text: flagText, kind: "flags" });
+
+  // 2. Keeping pace
+  if (thisWk > 0 || restockedWk > 0) {
+    const gap = thisWk - restockedWk;
+    rows.push({
+      tone: gap <= 0 ? "green" : "clay",
+      text:
+        gap <= 0
+          ? `${restockedWk} restocked this week, keeping pace with what's flagged`
+          : `${restockedWk} restocked vs ${thisWk} flagged this week, ${gap} still to catch up`,
+      kind: "pace",
+    });
+  }
+
+  // 3. Busiest room, last 30 days
+  const month = flagged.filter((h) => within(h, 30, 0));
+  const count = (arr, keyFn) => {
+    const m = {};
+    arr.forEach((h) => {
+      const k = keyFn(h);
+      if (k) m[k] = (m[k] || 0) + 1;
+    });
+    return Object.entries(m).sort((a, b) => b[1] - a[1]);
+  };
+  const rooms = count(month, (h) => h.room);
+  if (rooms.length) {
+    rows.push({ tone: "neutral", text: `${rooms[0][0]} had the most flags in the last 30 days (${rooms[0][1]})`, kind: "room" });
+  }
+
+  // 4. Top Sterilisation item, last 30 days
+  const byId = {};
+  items.forEach((i) => (byId[i.id] = i));
+  const steri = count(month.filter((h) => h.room === "Sterilisation"), (h) => h.itemId);
+  if (steri.length && byId[steri[0][0]]) {
+    rows.push({
+      tone: "neutral",
+      text: `${byId[steri[0][0]].name} ran low most often in Sterilisation this month (${steri[0][1]} time${steri[0][1] === 1 ? "" : "s"})`,
+      kind: "item",
+    });
+  }
+
+  // 5. Instruments going missing, last 30 days
+  const miss = count(history.filter((h) => h.action === "instrument_missing" && within(h, 30, 0)), (h) => h.instrumentName);
+  if (miss.length) {
+    rows.push({
+      tone: "clay",
+      text: `${miss[0][0]} went missing most often this month (${miss[0][1]} time${miss[0][1] === 1 ? "" : "s"})`,
+      kind: "missing",
+    });
+  }
+
+  // 6. Median restock time, last 30 days
+  const recent = history.filter((h) => h.action === "flagged" || (h.action === "resolved" && within(h, 30, 0)));
+  const rs = computeResolutionStats(recent);
+  if (rs.overallMedian !== null && rs.overallMedian !== undefined) {
+    rows.push({ tone: "neutral", text: `Median time to restock this month: ${formatDuration(rs.overallMedian)}`, kind: "time" });
+  }
+  return rows;
+}
+
+function TrendsSummary({ items, history }) {
+  const rows = buildTrendsSummary(items, history, new Date());
+  const ICONS = { flags: Flag, pace: CircleCheck, room: Building2, item: Package, missing: Search, time: Clock };
+  return (
+    <div className="di-panel di-tsum">
+      <div className="di-panel-head">
+        <h3>At a glance</h3>
+        <span className="di-hint-inline">Last 7 and 30 days</span>
+      </div>
+      <ul className="di-tsum-list">
+        {rows.map((r, i) => {
+          const Icon = ICONS[r.kind] || Info;
+          return (
+            <li key={i} className={`di-tsum-row${i === 0 ? " is-lead" : ""}`}>
+              <span className={`di-tsum-ico is-${r.tone}`}>
+                <Icon size={i === 0 ? 18 : 15} />
+              </span>
+              <span>{r.text}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 function Trends({ items, history, setView }) {
   const [missingRoom, setMissingRoom] = useState("All rooms");
 
@@ -4702,6 +4820,8 @@ function Trends({ items, history, setView }) {
         title="Trends"
         sub="Real numbers from every flag and resolve logged since day one -- Dark red discs are still culprit #1 🤣."
       />
+
+      <TrendsSummary items={items} history={history} />
 
       <div className="di-stats">
         <StatCard
@@ -6002,6 +6122,15 @@ const CSS = `
 .di-sheet { position: relative; }
 .di-sheet-head, .di-sheet-stats { position: relative; z-index: 1; }
 .di-edit-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 12px; }
+.di-tsum-list { list-style: none; margin: 0; padding: 0; }
+.di-tsum-row { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.di-tsum-row:last-child { border-bottom: none; }
+.di-tsum-row.is-lead { font-size: 16px; font-weight: 600; padding-top: 4px; padding-bottom: 12px; }
+.di-tsum-ico { width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center; flex-shrink: 0; background: var(--paper); color: var(--ink-soft); }
+.di-tsum-row.is-lead .di-tsum-ico { width: 38px; height: 38px; border-radius: 12px; }
+.di-tsum-ico.is-green { background: #E1F0E1; color: var(--green); }
+.di-tsum-ico.is-red { background: #F6D9D2; color: #A8402B; }
+.di-tsum-ico.is-clay { background: #F3E7D2; color: var(--clay); }
 .di-lab-hero { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 16px 18px; margin-bottom: 18px; border-radius: 18px; background: linear-gradient(135deg, #EEF3FA 0%, #F3EEF8 100%); border: 1px solid #E1E6F0; }
 .di-lab-hero.is-done { background: linear-gradient(135deg, #E9F3EA 0%, #EEF6E6 100%); border-color: #CFE3CF; }
 .di-lab-hero-icon { width: 44px; height: 44px; border-radius: 14px; display: grid; place-items: center; background: #fff; color: #5B6FA8; box-shadow: 0 2px 8px rgba(60,80,140,.12); }
