@@ -29,6 +29,7 @@ import {
   FileSpreadsheet,
   ChevronRight,
   Bell,
+  ListChecks,
   Clock,
   FlaskConical,
   Droplets,
@@ -974,6 +975,8 @@ export default function DentalInventoryApp() {
   const [roomAuditStatus, setRoomAuditStatus] = useState(null); // { [room]: { [checklistItemId]: {status, updatedAt, updatedBy} } }
   const [personalStock, setPersonalStock] = useState({}); // { [room]: { [itemId]: {name,category,count,...} } }
   const [personalRoom, setPersonalRoom] = useState(null);
+  const [roomTodos, setRoomTodos] = useState({}); // { [room]: [{id,text,done,...}] }
+  const [todoRoom, setTodoRoom] = useState(null);
   const [labChecks, setLabChecks] = useState({}); // { [taskId]: { doneAt, doneBy } }
   const [labNow, setLabNow] = useState(() => new Date());
   const [sharpsBins, setSharpsBins] = useState({}); // { [room]: { status, updatedAt, updatedBy } }
@@ -1248,6 +1251,28 @@ export default function DentalInventoryApp() {
       () => {}
     );
 
+    const unsubTodos = onSnapshot(
+      query(collection(db, "roomTodos")),
+      (snap) => {
+        const byRoom = {};
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          (byRoom[data.room] = byRoom[data.room] || []).push({
+            id: data.id || d.id,
+            text: data.text,
+            done: !!data.done,
+            createdAt: data.createdAt,
+            createdBy: data.createdBy || "",
+            doneAt: data.doneAt || null,
+            doneBy: data.doneBy || "",
+          });
+        });
+        Object.values(byRoom).forEach((arr) => arr.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)));
+        setRoomTodos(byRoom);
+      },
+      () => {}
+    );
+
     const unsubSharps = onSnapshot(
       query(collection(db, "sharpsBins")),
       (snap) => {
@@ -1315,6 +1340,7 @@ export default function DentalInventoryApp() {
       unsubRoomSettings();
       unsubPersonalStock();
       unsubSharps();
+      unsubTodos();
       unsubLab();
       unsubEndo();
       unsubExclusions();
@@ -1724,6 +1750,55 @@ export default function DentalInventoryApp() {
       );
     });
   }, []);
+
+  // ---- per-room to-do notepad: one document per to-do ------------------
+  const todoError = useCallback((e) => {
+    const denied = e && e.code === "permission-denied";
+    setSaveError(
+      denied
+        ? "To-do lists need the updated Firestore rules -- publish firestore.rules in the Firebase console."
+        : "Couldn't save -- check your connection."
+    );
+  }, []);
+  const addRoomTodo = useCallback(
+    (room, text, staff) => {
+      const clean = (text || "").trim();
+      if (!clean) return;
+      const id = `t_${Date.now()}_${Math.round(Math.random() * 9999)}`;
+      setDoc(doc(db, "roomTodos", id), {
+        id,
+        room,
+        text: clean.slice(0, 200),
+        done: false,
+        createdAt: new Date().toISOString(),
+        createdBy: staff || "",
+      }).catch(todoError);
+    },
+    [todoError]
+  );
+  const toggleRoomTodo = useCallback(
+    (todo, staff) => {
+      const nowDone = !todo.done;
+      updateDoc(doc(db, "roomTodos", todo.id), {
+        done: nowDone,
+        doneAt: nowDone ? new Date().toISOString() : null,
+        doneBy: nowDone ? staff || "" : "",
+      }).catch(todoError);
+    },
+    [todoError]
+  );
+  const deleteRoomTodo = useCallback(
+    (id) => {
+      deleteDoc(doc(db, "roomTodos", id)).catch(todoError);
+    },
+    [todoError]
+  );
+  const clearDoneTodos = useCallback(
+    (room, todos) => {
+      todos.filter((t) => t.done).forEach((t) => deleteDoc(doc(db, "roomTodos", t.id)).catch(todoError));
+    },
+    [todoError]
+  );
 
   // Sharps bin per room: "full" or "clear". Each change is also logged so it
   // shows up in the dashboard's recent activity.
@@ -2142,6 +2217,11 @@ export default function DentalInventoryApp() {
             setView("audit-room");
           }}
           personalStock={personalStock}
+          roomTodos={roomTodos}
+          onOpenTodo={(room) => {
+            setTodoRoom(room);
+            setView("room-todo");
+          }}
           labDue={labDue}
           sharpsBins={sharpsBins}
           onSetSharps={setSharpsStatus}
@@ -2206,6 +2286,19 @@ export default function DentalInventoryApp() {
           myName={myName}
           setMyName={setMyName}
           onSetStatus={setEndoSectionStatus}
+          onBack={() => setView("dashboard")}
+        />
+      )}
+      {view === "room-todo" && (
+        <RoomTodo
+          room={todoRoom}
+          todos={roomTodos[todoRoom] || []}
+          myName={myName}
+          setMyName={setMyName}
+          onAdd={addRoomTodo}
+          onToggle={toggleRoomTodo}
+          onDelete={deleteRoomTodo}
+          onClearDone={clearDoneTodos}
           onBack={() => setView("dashboard")}
         />
       )}
@@ -2711,6 +2804,8 @@ function RoomSheet({
   sharpsBins,
   onSetSharps,
   onOpenLab,
+  roomTodos,
+  onOpenTodo,
   onClose,
 }) {
   const settings = (roomSettings && roomSettings[room]) || { color: "", name: "" };
@@ -2824,6 +2919,17 @@ function RoomSheet({
             />
           </div>
         </div>
+
+        {(() => {
+          const open = ((roomTodos && roomTodos[room]) || []).filter((t) => !t.done).length;
+          return (
+            <button className="di-todo-btn" onClick={() => onOpenTodo(room)}>
+              <ListChecks size={15} /> To-do list
+              {open > 0 && <span className="di-todo-count">{open} open</span>}
+              <ChevronRight size={14} className="di-todo-chev" />
+            </button>
+          );
+        })()}
 
         {isTreatment && (
           <div className="di-sheet-details">
@@ -3475,7 +3581,7 @@ function HalloweenDecor() {
   );
 }
 
-function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, roomAudits, openOrders, missingAuditItems, openAlerts, roomsAffected, myRoom, myName, setView, onToggle, onSetItemStatus, onSetCustomStatus, onRebuildFlags, onOpenAudit, roomSettings, onSetRoomSetting, personalStock, onUsePersonal, onOpenPersonal, sharpsBins, onSetSharps, labDue }) {
+function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, roomAudits, openOrders, missingAuditItems, openAlerts, roomsAffected, myRoom, myName, setView, onToggle, onSetItemStatus, onSetCustomStatus, onRebuildFlags, onOpenAudit, roomSettings, onSetRoomSetting, personalStock, onUsePersonal, onOpenPersonal, sharpsBins, onSetSharps, labDue, roomTodos, onOpenTodo }) {
   const [openRoom, setOpenRoom] = useState(null);
   const [listOpen, setListOpen] = useState(false);
   const [cheerMsg, setCheerMsg] = useState(null);
@@ -3659,6 +3765,11 @@ function Dashboard({ items, itemsById, history, activeFlags, backorderedItems, r
             setView("endo-trolley");
           }}
           personalStock={personalStock}
+          roomTodos={roomTodos}
+          onOpenTodo={(r) => {
+            setOpenRoom(null);
+            onOpenTodo(r);
+          }}
           sharpsBins={sharpsBins}
           onSetSharps={onSetSharps}
           onOpenLab={() => {
@@ -4594,9 +4705,102 @@ function LabPage({ labChecks, now, myName, setMyName, onDone, onOpenEndo }) {
   );
 }
 
+function RoomTodo({ room, todos, myName, setMyName, onAdd, onToggle, onDelete, onClearDone, onBack }) {
+  const [text, setText] = useState("");
+  const [staff, setStaff] = useState("");
+  useEffect(() => {
+    if (myName) setStaff(myName);
+  }, [myName]);
+  if (!room) {
+    return (
+      <div className="di-page">
+        <EmptyState icon={Info} text="No room selected." />
+      </div>
+    );
+  }
+  const open = todos.filter((t) => !t.done);
+  const done = todos.filter((t) => t.done);
+  const submit = () => {
+    if (!text.trim()) return;
+    if (staff && staff !== myName) setMyName(staff);
+    onAdd(room, text, staff);
+    setText("");
+  };
+  const row = (t) => (
+    <li key={t.id} className={`di-note-row${t.done ? " is-done" : ""}`}>
+      <button
+        className={`di-note-check${t.done ? " is-on" : ""}`}
+        onClick={() => onToggle(t, staff)}
+        aria-label={t.done ? "Mark as not done" : "Mark as done"}
+        aria-pressed={t.done}
+      >
+        {t.done && (
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <polyline points="2.5,6.5 5,9 9.5,3.5" />
+          </svg>
+        )}
+      </button>
+      <span className="di-note-text">
+        {t.text}
+        {t.done && t.doneBy ? <span className="di-note-by"> · {t.doneBy}</span> : null}
+      </span>
+      <button className="di-note-del" aria-label="Delete" onClick={() => onDelete(t.id)}>
+        <Trash2 size={13} />
+      </button>
+    </li>
+  );
+  return (
+    <div className="di-page">
+      <button className="di-linklike di-back-link" onClick={onBack}>
+        &larr; Back to dashboard
+      </button>
+      <PageHeader eyebrow={room} title={`${room} to-do list`} sub="Jot down things to do and tick them off. Everyone in the clinic sees the same list for this room." />
+
+      <div className="di-notepad">
+        <div className="di-notepad-top">
+          <span className="di-notepad-title">Notes</span>
+          <span className="di-notepad-count">{open.length} to do</span>
+        </div>
+        <form
+          className="di-note-add"
+          onSubmit={(e) => {
+            e.preventDefault();
+            submit();
+          }}
+        >
+          <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Write something to do…" maxLength={200} />
+          <button type="submit" className="di-small-btn" disabled={!text.trim()}>
+            <Plus size={13} /> Add
+          </button>
+        </form>
+        {todos.length === 0 ? (
+          <div className="di-note-empty">Nothing here yet. Type above and press Add.</div>
+        ) : (
+          <ul className="di-note-list">
+            {open.map(row)}
+            {done.length > 0 && <li className="di-note-divider">Done</li>}
+            {done.map(row)}
+          </ul>
+        )}
+        {done.length > 0 && (
+          <button className="di-linklike di-note-clear" onClick={() => onClearDone(room, todos)}>
+            Clear {done.length} done
+          </button>
+        )}
+        <div className="di-note-name">
+          <label>Your name (optional)</label>
+          <input placeholder="e.g. Jess" value={staff} onChange={(e) => setStaff(e.target.value)} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PersonalStock({ room, items, stock, myName, setMyName, onAdd, onSetCount, onUse, onRemove, onBack }) {
   const [staff, setStaff] = useState("");
   const [q, setQ] = useState("");
+  const [custom, setCustom] = useState("");
+  const [customMsg, setCustomMsg] = useState("");
   useEffect(() => {
     if (myName) setStaff(myName);
   }, [myName]);
@@ -4615,6 +4819,20 @@ function PersonalStock({ room, items, stock, myName, setMyName, onAdd, onSetCoun
     ? items.filter((i) => !stock[i.id] && i.name.toLowerCase().includes(needle)).slice(0, 8)
     : [];
   const rememberName = () => staff && staff !== myName && setMyName(staff);
+  // Items typed in by the DA that aren't in the catalogue.
+  const addCustom = (raw) => {
+    const clean = (raw || "").trim().slice(0, 80);
+    if (!clean) return;
+    if (mine.some((m) => m.name.toLowerCase() === clean.toLowerCase())) {
+      setCustomMsg(`"${clean}" is already on the list.`);
+      return;
+    }
+    rememberName();
+    onAdd(room, { id: `custom-${slugify(clean)}-${Date.now().toString(36)}`, name: clean, category: "Custom" }, staff);
+    setCustom("");
+    setQ("");
+    setCustomMsg("");
+  };
 
   return (
     <div className="di-page">
@@ -4642,7 +4860,14 @@ function PersonalStock({ room, items, stock, myName, setMyName, onAdd, onSetCoun
           <Search size={14} />
           <input placeholder="Search the catalogue…" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
-        {needle && matches.length === 0 && <div className="di-hint-text" style={{ marginTop: 8 }}>No matching catalogue items (or already added).</div>}
+        {needle && matches.length === 0 && (
+          <div className="di-hint-text" style={{ marginTop: 8 }}>
+            No matching catalogue items (or already added).{" "}
+            <button className="di-linklike" onClick={() => addCustom(q)}>
+              Add "{q.trim()}" as your own item
+            </button>
+          </div>
+        )}
         {matches.length > 0 && (
           <ul className="di-ps-list" style={{ marginTop: 8 }}>
             {matches.map((i) => (
@@ -4669,6 +4894,26 @@ function PersonalStock({ room, items, stock, myName, setMyName, onAdd, onSetCoun
 
       <div className="di-panel">
         <div className="di-panel-head">
+          <h3>Add your own item</h3>
+        </div>
+        <div className="di-hint-text" style={{ marginBottom: 8 }}>Something that isn't in the catalogue? Type it in and it joins your list.</div>
+        <form
+          className="di-note-add"
+          onSubmit={(e) => {
+            e.preventDefault();
+            addCustom(custom);
+          }}
+        >
+          <input value={custom} onChange={(e) => { setCustom(e.target.value); setCustomMsg(""); }} placeholder="e.g. Mini mirror heads" maxLength={80} />
+          <button type="submit" className="di-small-btn" disabled={!custom.trim()}>
+            <Plus size={13} /> Add
+          </button>
+        </form>
+        {customMsg && <div className="di-hint-text" style={{ marginTop: 6, color: "var(--red)" }}>{customMsg}</div>}
+      </div>
+
+      <div className="di-panel">
+        <div className="di-panel-head">
           <h3>Counts</h3>
           <span className="di-panel-count">{mine.length}</span>
         </div>
@@ -4680,6 +4925,7 @@ function PersonalStock({ room, items, stock, myName, setMyName, onAdd, onSetCoun
               <li key={it.id} className="di-ps-row">
                 <span className="di-ps-name">
                   {it.name}
+                  {it.category === "Custom" && <span className="di-ps-tag">own</span>}
                   {it.updatedAt ? <span className="di-cell-sub"> · updated {timeAgo(it.updatedAt)}{it.updatedBy ? ` by ${it.updatedBy}` : ""}</span> : null}
                 </span>
                 <span className="di-ps-stepper">
@@ -6315,6 +6561,36 @@ const CSS = `
 .di-auditgoal-rest { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
 .di-auditgoal-restlabel { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-soft); margin-right: 2px; }
 .di-auditgoal-pill { min-width: 30px; height: 28px; padding: 0 8px; border-radius: 99px; border: 1px solid #E6CB92; background: #FBF1DC; color: #8A6516; font-weight: 700; font-size: 12.5px; font-family: inherit; cursor: pointer; }
+.di-todo-btn { display: flex; align-items: center; gap: 8px; width: 100%; margin: 0 0 12px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 12px; background: #fff; color: var(--ink); font-family: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer; text-align: left; }
+.di-todo-btn:hover { background: var(--paper); }
+.di-todo-count { background: var(--charcoal); color: #ECE7DA; border-radius: 99px; font-size: 10.5px; font-weight: 600; letter-spacing: .02em; padding: 2px 9px; }
+.di-todo-chev { margin-left: auto; color: var(--ink-soft); }
+.di-ps-tag { margin-left: 6px; background: var(--charcoal); color: #ECE7DA; border-radius: 99px; font-size: 10px; font-weight: 600; letter-spacing: .03em; padding: 1px 7px; }
+.di-notepad { max-width: 520px; background: #EFE9DC; border: 1px solid var(--sand); border-radius: 18px; padding: 26px 26px 22px; box-shadow: 0 1px 2px rgba(24,22,15,.05), 0 10px 28px rgba(24,22,15,.07); }
+.di-notepad-top { display: flex; align-items: baseline; justify-content: space-between; padding-bottom: 14px; border-bottom: 1.5px solid var(--ink); }
+.di-notepad-title { font-family: Georgia, "Fraunces", serif; font-style: italic; font-weight: 500; font-size: 28px; letter-spacing: -.01em; color: var(--ink); }
+.di-notepad-count { font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-soft); }
+.di-note-add { display: flex; align-items: center; gap: 10px; padding: 14px 0 6px; }
+.di-note-add input { flex: 1; min-width: 0; border: none; border-bottom: 1px solid rgba(24,22,15,.25); background: transparent; padding: 9px 0; font-size: 14.5px; font-family: inherit; color: var(--ink); outline: none; border-radius: 0; }
+.di-note-add input::placeholder { color: var(--ink-soft); }
+.di-note-add input:focus { border-bottom-color: var(--ink); }
+.di-notepad .di-small-btn { background: var(--charcoal); border-color: var(--charcoal); color: #ECE7DA; border-radius: 99px; padding: 7px 14px; font-weight: 600; }
+.di-notepad .di-small-btn:disabled { opacity: .35; cursor: not-allowed; }
+.di-note-list { list-style: none; margin: 6px 0 0; padding: 0; }
+.di-note-row { display: flex; align-items: center; gap: 12px; padding: 13px 0; border-bottom: 1px solid rgba(24,22,15,.12); }
+.di-note-check { width: 20px; height: 20px; flex-shrink: 0; border-radius: 50%; border: 1.5px solid var(--ink); background: transparent; display: grid; place-items: center; cursor: pointer; color: #EFE9DC; padding: 0; }
+.di-note-check:hover { background: rgba(24,22,15,.08); }
+.di-note-check.is-on { background: var(--ink); }
+.di-note-text { flex: 1; font-size: 14.5px; line-height: 1.35; overflow-wrap: anywhere; }
+.di-note-row.is-done .di-note-text { text-decoration: line-through; text-decoration-color: rgba(24,22,15,.4); color: var(--ink-soft); }
+.di-note-by { font-size: 11.5px; display: inline-block; text-decoration: none; }
+.di-note-del { border: none; background: transparent; color: var(--ink-soft); cursor: pointer; padding: 6px; border-radius: 8px; opacity: .6; }
+.di-note-del:hover { opacity: 1; color: var(--ink); }
+.di-note-divider { padding: 18px 0 4px; font-size: 10.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-soft); }
+.di-note-empty { padding: 22px 0 10px; font-size: 13.5px; color: var(--ink-soft); font-style: italic; font-family: Georgia, "Fraunces", serif; }
+.di-note-clear { margin: 12px 0 0; font-size: 12px; }
+.di-note-name { margin-top: 18px; padding-top: 14px; border-top: 1px solid rgba(24,22,15,.12); font-size: 10.5px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-soft); }
+.di-note-name input { display: block; margin-top: 6px; border: none; border-bottom: 1px solid rgba(24,22,15,.25); background: transparent; border-radius: 0; padding: 6px 0; font-size: 13.5px; font-family: inherit; color: var(--ink); width: 180px; outline: none; text-transform: none; letter-spacing: 0; }
 .di-glance { margin-bottom: 20px; }
 .di-glance-hero { display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; padding: 22px 24px; border-radius: 22px; background: linear-gradient(135deg, #F4EFE6 0%, #EEF1F7 100%); border: 1px solid #E6E2D8; margin-bottom: 12px; }
 .di-glance-hero.is-green { background: linear-gradient(135deg, #E7F2E6 0%, #EEF6EA 100%); border-color: #CFE2CD; }

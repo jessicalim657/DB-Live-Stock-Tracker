@@ -55,5 +55,8 @@ service cloud.firestore {
     match /labChecks/{document} {
       allow read, write: if true;
     }
+    match /roomTodos/{document} {
+      allow read, write: if true;
+    }
   }
 }
